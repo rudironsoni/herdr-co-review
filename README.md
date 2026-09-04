@@ -114,8 +114,10 @@ herdr plugin link /path/to/checkout    # local dev; skips build steps, so run
 
 The plugin's install step runs
 [`scripts/install-binary.sh`](./scripts/install-binary.sh), which **downloads the
-prebuilt binary** for your platform (falling back to `cargo build` only if no
-release asset is available) — so installing the plugin needs no Rust toolchain.
+prebuilt binary** for your platform — so installing the plugin needs no Rust
+toolchain. The prebuilt asset is only trusted when the checkout *is*
+`elKei24/herdr-co-review`; a fork or local checkout is always built from its
+own source with `cargo build --release` (which needs a Rust toolchain).
 You get a "Co-review this pull request" action and a GitHub-PR link handler
 (Ctrl+click a PR URL to start a review). Manifest:
 [`herdr-plugin.toml`](./herdr-plugin.toml).

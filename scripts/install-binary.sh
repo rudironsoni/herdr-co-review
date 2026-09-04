@@ -16,6 +16,26 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 bindir="${root}/bin"
 mkdir -p "${bindir}"
 
+# Artifact provenance: the prebuilt release asset is published by $REPO, so it
+# is only the right binary when this checkout *is* $REPO. A fork, a local
+# checkout, or a branch of another source has no matching asset — building it
+# from source is the only way to guarantee the installed binary comes from the
+# checked-out code. Fail closed: when the checkout's origin is known and is a
+# different repo, never download. (A checkout with no readable origin keeps the
+# download path — standalone runs against $REPO's release.)
+checkout_repo="$(
+  git -C "${root}" remote get-url origin 2>/dev/null \
+    | sed -E -e 's#^ssh://git@github\.com/##' -e 's#^git@github\.com:##' \
+             -e 's#^https://github\.com/##' -e 's#\.git$##' \
+    | tr '[:upper:]' '[:lower:]' \
+    || true
+)"
+trust_release_asset=1
+if [ -n "${checkout_repo}" ] && [ "${checkout_repo}" != "$(printf '%s' "${REPO}" | tr '[:upper:]' '[:lower:]')" ]; then
+  echo "Checkout origin is '${checkout_repo}', not '${REPO}'; building from source."
+  trust_release_asset=0
+fi
+
 # Map the host to a Rust target triple used in the release asset names.
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -55,10 +75,15 @@ build() {
   chmod +x "${bindir}/co-review"
 }
 
-if download; then
+if [ "${trust_release_asset}" = 1 ] && download; then
   echo "Installed prebuilt co-review -> ${bindir}/co-review"
 elif build; then
   echo "Built co-review -> ${bindir}/co-review"
+elif [ "${trust_release_asset}" = 0 ]; then
+  echo "error: this checkout is '${checkout_repo}', so its binary must be built from" >&2
+  echo "       source, but cargo is not available. Install Rust (https://rustup.rs)" >&2
+  echo "       and re-run." >&2
+  exit 1
 else
   echo "error: could not download a prebuilt binary (no release asset for '${triple:-unknown}')" >&2
   echo "       and cargo is not available to build from source." >&2

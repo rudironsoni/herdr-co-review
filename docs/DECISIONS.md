@@ -437,3 +437,26 @@ prompt`, §13), so the hand-back is now a push:
 `co-review wait` stays, as a documented fallback for setups where the navigator
 cannot reach the agent (no Herdr, scripted/CI use); the docs now steer agents
 away from it inside a normal session.
+
+## 20. The prebuilt asset is only trusted when the checkout is the publishing repo (2026-09-04)
+
+The plugin build step (`scripts/install-binary.sh`) downloaded
+`elKei24/herdr-co-review`'s latest release binary unconditionally. Installing
+the *fork* (`herdr plugin install rudironsoni/herdr-co-review --ref main`)
+therefore checked out the fork's source and then replaced it with upstream's
+binary — the Herdr action execs `$root/bin/co-review`, so the fork's changes
+never ran. The runtime fix for herdr#2862 (§15) was verified against
+`target/debug/co-review`, which proved the new code works with Herdr, but not
+that installing the fork installs it; artifact provenance was the missing
+integration boundary.
+
+The build step now derives the checkout's identity from its own `origin`
+(normalizing https/ssh URL shapes, `.git` suffixes, and case) and only
+downloads the prebuilt asset when the checkout *is* the repo that publishes
+it. Any other origin fails closed: build the checked-out source with `cargo
+build --release`. A checkout with no readable origin (a standalone tarball
+run) keeps the historical download path. The upstream fast path is unchanged
+— decision 12's "no Rust toolchain needed" still applies where it can
+actually be honored. The trade cost is that fork/branch installs always need
+Rust and a compile; that is the price of the binary provably coming from the
+code that was checked out.

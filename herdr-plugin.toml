@@ -13,8 +13,9 @@ description = "Interactive, split-screen PR co-review between you and your AI ag
 platforms = ["linux", "macos"]
 
 # On install, put a `co-review` binary in bin/: download the prebuilt release
-# asset for this platform, or fall back to `cargo build` if Rust is available.
-# So installing the plugin does not require a Rust toolchain.
+# asset when this checkout is the repo that publishes it
+# (elKei24/herdr-co-review), otherwise build the checked-out source with
+# cargo — the asset is only trusted when its provenance matches the checkout.
 [[build]]
 command = ["bash", "scripts/install-binary.sh"]
 
