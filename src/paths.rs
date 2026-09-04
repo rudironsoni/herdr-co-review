@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! <base>/
-//!   sessions/<slug>/        session dir: state.json, lock, logs, prompt
+//!   sessions/<slug>/        session dir: state.json, lock, agent-launch.json
 //!   worktrees/<slug>/       the checked-out PR the agent works in
 //! ```
 //!
@@ -21,6 +21,26 @@ pub const HOME_ENV: &str = "CO_REVIEW_HOME";
 /// this in both panes so `view`, `add-finding`, etc. find the session with no
 /// arguments.
 pub const SESSION_ENV: &str = "CO_REVIEW_SESSION";
+
+/// Environment variable holding the absolute path of the co-review executable
+/// that started the session. `start` sets this in both panes; agent-facing
+/// instructions invoke co-review through it (`"$CO_REVIEW_BIN"`), so a session
+/// never depends on PATH resolution.
+pub const BIN_ENV: &str = "CO_REVIEW_BIN";
+
+/// The absolute path of the running co-review executable. Session identity
+/// requires the *exact* binary, so anything else (or a failure to resolve) is
+/// a hard error rather than a fallback to a bare `co-review` name.
+pub fn require_self_bin() -> Result<String> {
+    let p = std::env::current_exe().context("resolving the co-review executable path")?;
+    if !p.is_absolute() {
+        return Err(anyhow!(
+            "the co-review executable path is not absolute: {}",
+            p.display()
+        ));
+    }
+    Ok(p.to_string_lossy().into_owned())
+}
 
 /// The base directory for all co-review data.
 pub fn base_dir() -> Result<PathBuf> {
@@ -62,6 +82,31 @@ pub fn config_path() -> Result<PathBuf> {
     let proj = directories::ProjectDirs::from("dev", "herdr", "co-review")
         .ok_or_else(|| anyhow!("could not determine a config directory for co-review"))?;
     Ok(proj.config_dir().join("config.toml"))
+}
+
+/// The session an internal pane process belongs to, taken strictly from
+/// `$CO_REVIEW_SESSION`. Unlike [`resolve_session_dir`], this never guesses:
+/// the pane environment is the declared transport for session identity, so a
+/// missing, empty, or invalid value is a hard error — never a scan of the
+/// sessions directory, never the sole existing session.
+pub fn require_session_env() -> Result<PathBuf> {
+    let value = std::env::var(SESSION_ENV).map_err(|_| {
+        anyhow!(
+            "${SESSION_ENV} is not set; this command only works inside a prepared co-review pane"
+        )
+    })?;
+    if value.is_empty() {
+        return Err(anyhow!(
+            "${SESSION_ENV} is empty; refusing to guess a session"
+        ));
+    }
+    let path = PathBuf::from(&value);
+    if !path.join(crate::store::STATE_FILE).is_file() {
+        return Err(anyhow!(
+            "${SESSION_ENV} points at {value}, which has no session state"
+        ));
+    }
+    Ok(path)
 }
 
 /// Resolve which session directory to operate on, for agent/human-facing

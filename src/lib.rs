@@ -11,6 +11,7 @@
 //! - [`commands`] — agent/human subcommands; [`orchestrate`] — `start`; [`tui`] —
 //!   the navigator.
 
+pub mod agent_launch;
 pub mod cli;
 pub mod commands;
 pub mod config;

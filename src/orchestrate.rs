@@ -12,40 +12,33 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::agent_launch::AgentLaunchSpec;
 use crate::cli::StartArgs;
 use crate::config::Config;
 use crate::git::{self, Git};
-use crate::herdr::{Herdr, PluginContext};
+use crate::herdr::{shell_join, shell_quote, Herdr, PluginContext};
 use crate::model::{PrInfo, SessionMeta, State};
 use crate::store::Store;
 
 /// The concrete plan for laying out the Herdr panes. Pure data so it can be
 /// unit-tested and printed for `--dry-run`.
+///
+/// The two channels stay separate: session and binary identity travel through
+/// Herdr's native `--env` (which never touches the pane's PTY input), while the
+/// typed pane commands carry *only* the operation to execute — `<self_bin>
+/// view` and `<self_bin> __launch-agent`. Nothing else (no env prefix, no
+/// PATH, no session path, no prompt) ever crosses `pane run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutPlan {
     pub label: String,
     pub worktree: String,
-    /// argv for the agent pane, env-prefixed; `None` with `--no-agent`.
+    /// Exactly `CO_REVIEW_SESSION` and `CO_REVIEW_BIN`, set on both panes.
+    pub env: Vec<(String, String)>,
+    /// argv for the agent pane: `[self_bin, __launch-agent]`; `None` with
+    /// `--no-agent`.
     pub agent_argv: Option<Vec<String>>,
-    /// argv for the navigator pane, env-prefixed.
+    /// argv for the navigator pane: `[self_bin, view]`.
     pub view_argv: Vec<String>,
-}
-
-/// Prefix an argv with `env CO_REVIEW_SESSION=<dir> PATH=<bindir>:<PATH>` so
-/// the process — and every `co-review` command it spawns — targets this session
-/// without `--session`, and finds the *bare* `co-review` the prompt and
-/// protocol tell the agent to run even when the binary is not otherwise on
-/// PATH (e.g. it is the Herdr plugin's private copy under the plugin root).
-fn env_prefixed(session_dir: &str, self_bin: &str, argv: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(argv.len() + 3);
-    out.push("env".to_string());
-    out.push(format!("{}={}", crate::paths::SESSION_ENV, session_dir));
-    if let Some(dir) = Path::new(self_bin).parent().filter(|d| d.is_absolute()) {
-        let path = std::env::var("PATH").unwrap_or_default();
-        out.push(format!("PATH={}:{path}", dir.display()));
-    }
-    out.extend(argv.iter().cloned());
-    out
 }
 
 /// Build the layout plan. `self_bin` is the absolute path to the co-review
@@ -55,24 +48,20 @@ pub fn plan_layout(
     session_dir: &str,
     worktree: &str,
     label: &str,
-    agent_command: Option<&[String]>,
+    with_agent: bool,
 ) -> LayoutPlan {
-    let view_argv = env_prefixed(
-        session_dir,
-        self_bin,
-        &[
-            self_bin.to_string(),
-            "view".to_string(),
-            "--session".to_string(),
-            session_dir.to_string(),
-        ],
-    );
-    let agent_argv = agent_command.map(|cmd| env_prefixed(session_dir, self_bin, cmd));
     LayoutPlan {
         label: label.to_string(),
         worktree: worktree.to_string(),
-        agent_argv,
-        view_argv,
+        env: vec![
+            (
+                crate::paths::SESSION_ENV.to_string(),
+                session_dir.to_string(),
+            ),
+            (crate::paths::BIN_ENV.to_string(), self_bin.to_string()),
+        ],
+        view_argv: vec![self_bin.to_string(), "view".to_string()],
+        agent_argv: with_agent.then(|| vec![self_bin.to_string(), "__launch-agent".to_string()]),
     }
 }
 
@@ -176,22 +165,25 @@ pub fn start(args: &StartArgs) -> Result<()> {
         &pr_display,
         &protocol_path.to_string_lossy(),
     );
-    let agent_argv = if args.no_agent {
+    // The fully resolved agent argv (with the whole prompt) is private launch
+    // state: it goes to `agent-launch.json`, never into a typed pane command.
+    let launch_spec = if args.no_agent {
         None
     } else {
-        Some(agent.build_command(&prompt))
+        Some(AgentLaunchSpec::new(agent.build_command(&prompt)))
     };
 
-    let self_bin = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "co-review".to_string());
+    // Session identity: the exact executable performing this start. A resume
+    // re-establishes it, so the executable that resumes becomes the session's
+    // binary for the newly opened panes.
+    let self_bin = crate::paths::require_self_bin()?;
     let label = format!("co-review {owner}/{repo}#{number}");
     let plan = plan_layout(
         &self_bin,
         &session_dir.to_string_lossy(),
         &worktree.to_string_lossy(),
         &label,
-        agent_argv.as_deref(),
+        launch_spec.is_some(),
     );
 
     if args.dry_run {
@@ -250,6 +242,15 @@ pub fn start(args: &StartArgs) -> Result<()> {
         store.create(&State::new(pr.clone(), session_meta))?;
     }
 
+    // (Re)generate the private launch spec on every start, including --resume:
+    // the selected agent, its configured argv, the rendered prompt, and the
+    // launching executable may all have changed. A --no-agent resume clears a
+    // stale spec instead.
+    match &launch_spec {
+        Some(spec) => crate::agent_launch::write(&session_dir, spec)?,
+        None => crate::agent_launch::remove(&session_dir)?,
+    }
+
     eprintln!(
         "co-review session ready for {owner}/{repo}#{number}\n  worktree: {}\n  session:  {}",
         worktree.display(),
@@ -268,18 +269,31 @@ pub fn start(args: &StartArgs) -> Result<()> {
 }
 
 /// When automatic Herdr layout fails, tell the user how to open the panes.
+/// This exercises exactly the same contract as the live panes: identity via
+/// `$CO_REVIEW_SESSION`/`$CO_REVIEW_BIN`, operations as bare subcommands.
 fn print_manual_fallback(plan: &LayoutPlan, err: &anyhow::Error) {
     eprintln!("\nwarning: couldn't set up the Herdr split automatically ({err}).");
-    eprintln!("The worktree and session are ready — open two panes yourself:");
-    eprintln!("  1. cd {}", plan.worktree);
-    eprintln!(
-        "  2. navigator: {}",
-        crate::herdr::shell_join(&plan.view_argv)
-    );
-    match &plan.agent_argv {
-        Some(argv) => eprintln!("  3. agent:     {}", crate::herdr::shell_join(argv)),
-        None => eprintln!("  3. (start your agent in the other pane)"),
+    for line in fallback_lines(plan) {
+        eprintln!("{line}");
     }
+}
+
+/// The manual-open instructions. Every value is shell-quoted: the default
+/// macOS session path contains spaces ("Library/Application Support").
+fn fallback_lines(plan: &LayoutPlan) -> Vec<String> {
+    let mut lines = vec![
+        "The worktree and session are ready — open two panes in the worktree yourself:".to_string(),
+        format!("  cd {}", shell_quote(&plan.worktree)),
+    ];
+    for (k, v) in &plan.env {
+        lines.push(format!("  export {k}={}", shell_quote(v)));
+    }
+    lines.push("  navigator: \"$CO_REVIEW_BIN\" view".to_string());
+    lines.push(match &plan.agent_argv {
+        Some(_) => "  agent:     \"$CO_REVIEW_BIN\" __launch-agent".to_string(),
+        None => "  agent:     (start your agent in the other pane)".to_string(),
+    });
+    lines
 }
 
 fn resolve_prompt(args: &StartArgs, cfg: &Config) -> Result<String> {
@@ -406,7 +420,7 @@ fn launch_layout(plan: &LayoutPlan, store: &Store) -> Result<()> {
     // (possibly half-created) panes rather than orphaning them. `end` requires
     // --force here on purpose: with pane ids recorded we can't tell a
     // half-launched session from a live one, so we don't wipe it silently.
-    let ws = herdr.workspace_create(&plan.worktree, &plan.label)?;
+    let ws = herdr.workspace_create(&plan.worktree, &plan.label, &plan.env)?;
     let agent_pane = ws.first_pane.clone();
     store.update(|s| {
         s.session.workspace_id = Some(ws.id.clone());
@@ -415,7 +429,7 @@ fn launch_layout(plan: &LayoutPlan, store: &Store) -> Result<()> {
     })?;
 
     // Navigator on the right; keep focus on the agent pane.
-    let view_pane = herdr.pane_split(&agent_pane, false, Some(&plan.worktree))?;
+    let view_pane = herdr.pane_split(&agent_pane, false, Some(&plan.worktree), &plan.env)?;
     store.update(|s| {
         s.session.view_pane_id = Some(view_pane.clone());
         Ok(())
@@ -455,78 +469,156 @@ fn print_dry_run(
         "git worktree add --detach --force {} <pr-head>",
         plan.worktree
     );
+    println!("\n## environment (would set in both panes)");
+    for (k, v) in &plan.env {
+        println!("{k}={v}");
+    }
+    if plan.agent_argv.is_some() {
+        println!(
+            "\n## would write: {}",
+            session_dir.join(crate::agent_launch::FILE_NAME).display()
+        );
+    }
     println!("\n## herdr (would run)");
+    let env_flags: String = plan
+        .env
+        .iter()
+        .map(|(k, v)| format!(" --env {k}={v}"))
+        .collect();
     println!(
-        "herdr workspace create --cwd {} --label {:?}",
+        "herdr workspace create --cwd {} --label {:?}{env_flags}",
         plan.worktree, plan.label
     );
     println!(
-        "herdr pane split <w:p1> --direction right --cwd {} --no-focus",
+        "herdr pane split <w:p1> --direction right --cwd {} --no-focus{env_flags}",
         plan.worktree
     );
-    println!("herdr pane run <w:p2> {:?}", plan.view_argv.join(" "));
     match &plan.agent_argv {
-        Some(a) => println!("herdr pane run <w:p1> {:?}", a.join(" ")),
+        Some(a) => println!("herdr pane run <w:p1> {}", shell_join(a)),
         None => println!("(--no-agent: left pane left as a shell)"),
     }
-    println!("\n## prompt handed to the agent\n");
+    println!("herdr pane run <w:p2> {}", shell_join(&plan.view_argv));
+    println!("\n## prompt handed to the agent (via agent-launch.json, never typed)\n");
     println!("{prompt}");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::{BIN_ENV, SESSION_ENV};
+
+    const SELF_BIN: &str = "/some/private/herdr/plugin/path/co-review";
 
     #[test]
-    fn env_prefix_targets_session_and_binary_dir() {
-        let out = env_prefixed(
-            "/s/dir",
-            "/plug/bin/co-review",
-            &["claude".into(), "hi".into()],
+    fn env_is_exactly_session_and_bin() {
+        let plan = plan_layout(SELF_BIN, "/s/dir", "/w/tree", "lbl", true);
+        assert_eq!(
+            plan.env,
+            vec![
+                (SESSION_ENV.to_string(), "/s/dir".to_string()),
+                (BIN_ENV.to_string(), SELF_BIN.to_string()),
+            ],
+            "env must carry exactly the two identity variables, in order"
         );
-        assert_eq!(out[0], "env");
-        assert_eq!(out[1], "CO_REVIEW_SESSION=/s/dir");
         assert!(
-            out[2].starts_with("PATH=/plug/bin:"),
-            "agent pane must find the launching binary on PATH: {:?}",
-            out[2]
+            !plan.env.iter().any(|(k, _)| k == "PATH"),
+            "PATH is never part of the session environment"
         );
-        assert_eq!(out[3], "claude");
-        assert_eq!(out[4], "hi");
     }
 
+    /// The pane transport invariant: even with a huge inherited PATH and a
+    /// huge prompt, `pane run` carries exactly `<self_bin> view` and
+    /// `<self_bin> __launch-agent` — no session path, no prompt, no PATH.
     #[test]
-    fn env_prefix_skips_path_for_bare_binary_name() {
-        // A relative fallback like plain "co-review" has no usable directory.
-        let out = env_prefixed("/s", "co-review", &["x".into()]);
-        assert!(!out.iter().any(|a| a.starts_with("PATH=")));
-    }
+    fn pane_transport_is_minimal() {
+        let prompt = "p".repeat(16 * 1024);
+        let session_dir = format!("/s/{}", "d".repeat(1024));
+        let plan = plan_layout(SELF_BIN, &session_dir, "/w/tree", "lbl", true);
 
-    #[test]
-    fn plan_has_env_prefixed_view_and_agent() {
-        let plan = plan_layout(
-            "/usr/bin/co-review",
-            "/s/dir",
-            "/w/tree",
-            "co-review o/r#1",
-            Some(&["claude".to_string(), "prompt text".to_string()]),
+        assert_eq!(
+            plan.view_argv,
+            vec![SELF_BIN.to_string(), "view".to_string()]
         );
-        assert_eq!(plan.worktree, "/w/tree");
-        assert!(plan.view_argv.contains(&"view".to_string()));
-        assert_eq!(plan.view_argv[0], "env");
-        assert!(plan
-            .view_argv
-            .iter()
-            .any(|a| a == "CO_REVIEW_SESSION=/s/dir"));
-        let agent = plan.agent_argv.unwrap();
-        assert_eq!(agent[0], "env");
-        assert!(agent.contains(&"claude".to_string()));
-        assert!(agent.contains(&"prompt text".to_string()));
+        assert_eq!(
+            plan.agent_argv,
+            Some(vec![SELF_BIN.to_string(), "__launch-agent".to_string()])
+        );
+
+        for argv in [&plan.view_argv, plan.agent_argv.as_ref().unwrap()] {
+            for arg in argv {
+                assert!(
+                    !arg.contains(&session_dir),
+                    "session path leaked into {arg:?}"
+                );
+                assert!(!arg.contains(&prompt[..64]), "prompt leaked into {arg:?}");
+                assert!(!arg.contains("PATH"), "PATH leaked into {arg:?}");
+                assert!(
+                    !arg.contains("CO_REVIEW_SESSION="),
+                    "env prefix leaked into {arg:?}"
+                );
+            }
+            let typed = shell_join(argv);
+            assert!(
+                typed.len() < 512,
+                "pane command should be tiny (<512 bytes, well under herdr#2862's ~1 KiB), got {} bytes: {typed:?}",
+                typed.len()
+            );
+        }
+
+        // The full prompt lives only in the private launch spec.
+        let spec = AgentLaunchSpec::new(vec!["claude".to_string(), prompt.clone()]);
+        assert_eq!(spec.argv[1].len(), 16 * 1024);
     }
 
     #[test]
     fn plan_without_agent() {
-        let plan = plan_layout("/b", "/s", "/w", "l", None);
+        let plan = plan_layout(SELF_BIN, "/s", "/w", "l", false);
         assert!(plan.agent_argv.is_none());
+        // Navigator identity still comes through the environment.
+        assert!(plan.env.iter().any(|(k, _)| k == BIN_ENV));
+    }
+
+    /// Resume re-establishes binary identity: the plan — and with it the env
+    /// Herdr sets on the new panes — follows whichever executable performs the
+    /// (re)start.
+    #[test]
+    fn plan_tracks_the_exact_self_bin() {
+        let other = "/opt/dev-checkout/target/debug/co-review";
+        let plan = plan_layout(other, "/s", "/w", "l", true);
+        assert_eq!(plan.env[1], (BIN_ENV.to_string(), other.to_string()));
+        assert_eq!(plan.view_argv[0], other);
+        assert_eq!(plan.agent_argv.as_ref().unwrap()[0], other);
+    }
+
+    #[test]
+    fn fallback_is_valid_shell_under_spacey_paths() {
+        // The default macOS session path contains spaces.
+        let plan = plan_layout(
+            "/Users/test/My Tools/co-review",
+            "/Users/test/Library/Application Support/co review/session",
+            "/w/tree",
+            "l",
+            true,
+        );
+        let lines = fallback_lines(&plan);
+        let text = lines.join("\n");
+        assert!(text.contains(
+            "export CO_REVIEW_SESSION='/Users/test/Library/Application Support/co review/session'"
+        ));
+        assert!(text.contains("export CO_REVIEW_BIN='/Users/test/My Tools/co-review'"));
+        assert!(text.contains("\"$CO_REVIEW_BIN\" view"));
+        assert!(text.contains("\"$CO_REVIEW_BIN\" __launch-agent"));
+        // Same contract as the live panes: no unquoted path left unprotected,
+        // no PATH or env-prefix machinery anywhere.
+        assert!(!text.contains("PATH="));
+        for line in &lines {
+            if line.starts_with("  export ") {
+                let value = line.rsplit('=').next().unwrap();
+                assert!(
+                    value.starts_with('\'') && value.ends_with('\''),
+                    "spacey values must be single-quoted: {line}"
+                );
+            }
+        }
     }
 }

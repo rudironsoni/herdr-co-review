@@ -768,6 +768,17 @@ pub fn prompt() -> Result<()> {
     Ok(())
 }
 
+/// `__launch-agent` — hidden internal plumbing that `start` types into the
+/// agent pane. Session identity comes exclusively from `$CO_REVIEW_SESSION`
+/// (strictly resolved — never a guess); the agent argv comes from the
+/// session's private launch spec. The file and process mechanics live in
+/// [`crate::agent_launch`].
+pub fn launch_agent() -> Result<()> {
+    let session_dir = crate::paths::require_session_env()?;
+    let spec = crate::agent_launch::read(&session_dir)?;
+    crate::agent_launch::execute(&session_dir, &spec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

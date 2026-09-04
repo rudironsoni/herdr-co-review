@@ -63,12 +63,13 @@ talk to each other through the `co-review` CLI:
    └────────────┬─────────────┘
                 │  herdr workspace create / pane split
    ┌────────────┴───────────────────────────────┐
-   │ Herdr workspace                             │
+   │ Herdr workspace (both panes get             │
+   │ CO_REVIEW_SESSION + CO_REVIEW_BIN)          │
    │ ┌───────────────┐   ┌────────────────────┐  │
    │ │ agent (left)  │   │ navigator (right)  │  │
    │ │ reviews, runs │◀─▶│ co-review view     │  │
-   │ │ `co-review    │   │ select finding →   │  │
-   │ │  add-finding` │   │ see code, triage,  │  │
+   │ │ "$CO_REVIEW_  │   │ select finding →   │  │
+   │ │ BIN" add-...  │   │ see code, triage,  │  │
    │ │ hands off     │   │ chat, decide       │  │
    │ └───────────────┘   └────────────────────┘  │
    └─────────────────────────────────────────────┘
@@ -123,7 +124,9 @@ Installing the plugin is enough to use the CLI too: it symlinks the binary into
 the same directory the installer above would pick, so `co-review start …` works
 from your shells. A `co-review` you installed yourself is never overwritten or
 shadowed — the step warns and leaves your PATH alone. `CO_REVIEW_NO_PATH_LINK=1`
-skips it entirely.
+skips it entirely. The symlink is a convenience for your own shells only: a
+running session never resolves `co-review` through PATH — each pane carries the
+exact executable in `$CO_REVIEW_BIN`.
 
 `herdr plugin uninstall` removes the plugin but leaves that symlink behind;
 `co-review doctor` prints its path so you can `rm` it.
@@ -208,21 +211,24 @@ Built-in agents: `claude`, `codex`, `gemini`, `cursor`, `amp`, `opencode`.
 
 ## The agent contract
 
-The agent records findings and reads your decisions through these commands
+The agent records findings and reads your decisions through co-review commands
 (`co-review protocol` prints the full reference; the [Claude skill](./skills/co-review/SKILL.md)
-teaches Claude to use them):
+teaches Claude to use them). Inside a session the agent never runs a bare
+`co-review`: `start` sets `$CO_REVIEW_BIN` in the agent pane to the exact
+executable for that session, and the agent invokes everything through it:
 
 ```sh
-co-review add-finding --title "…" --severity high --category correctness \
+"$CO_REVIEW_BIN" add-finding --title "…" --severity high --category correctness \
   --location src/foo.rs:42-48 --body "…" [--suggestion "…"]
-co-review import findings.json        # bulk add from a JSON array
-co-review set-status awaiting_review  # hand off; the agent then idles until the
-                                      # navigator says every finding is decided
-co-review wait                        # fallback: block until triage is done
-                                      # (for setups without Herdr)
-co-review list --json                 # read verdicts + your notes
-co-review edit f3 --body "…"          # revise a finding after you discuss it
-co-review mark-posted f3 --url <url>  # after posting to GitHub
+"$CO_REVIEW_BIN" import findings.json       # bulk add from a JSON array
+"$CO_REVIEW_BIN" set-status awaiting_review # hand off; the agent then idles until
+                                            # the navigator says every finding is
+                                            # decided
+"$CO_REVIEW_BIN" wait                       # fallback: block until triage is done
+                                            # (for setups without Herdr)
+"$CO_REVIEW_BIN" list --json                # read verdicts + your notes
+"$CO_REVIEW_BIN" edit f3 --body "…"         # revise a finding after you discuss it
+"$CO_REVIEW_BIN" mark-posted f3 --url <url> # after posting to GitHub
 ```
 
 You can also post directly (a fallback for agent-agnostic use), given a GitHub

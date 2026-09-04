@@ -33,7 +33,9 @@ Node is only for release/lint tooling: `npm ci`, then `npx commitlint`.
   exclusive advisory lock and bumps a monotonic `rev`. Never write `state.json`
   directly.
 - `commands.rs` — agent/human subcommands. `orchestrate.rs` — `start`.
-  `tui/` — the navigator.
+  `agent_launch.rs` — the private `agent-launch.json` spec and the hidden,
+  fail-closed `__launch-agent` exec; session identity there comes only from
+  `$CO_REVIEW_SESSION`. `tui/` — the navigator.
 - `git.rs` / `github.rs` / `herdr.rs` / `exec.rs` — external integrations, each a
   thin wrapper. `diffview.rs` — turns a finding into its related code.
 

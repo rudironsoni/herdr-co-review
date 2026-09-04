@@ -253,17 +253,57 @@ exists — rulesets need the repo to be public or on GitHub Pro). With the secre
 unset, checkout falls back to token auth, so the pipeline still works before
 the key is configured.
 
-## 15. Sessions put the launching binary on the panes' PATH
+## 15. Explicit session binary identity via `CO_REVIEW_BIN` (2026-09-04)
 
-The prompt and protocol tell the agent to run bare `co-review …`, but a
-plugin-only install keeps the binary private under the plugin root — the agent's
-first `add-finding` would die with "command not found" (caught by the user right
-after install; the live e2e had missed it by always using absolute paths). The
-fix is in the layout, not the docs: the `env` prefix on both pane commands now
-also prepends the launching binary's directory to PATH, so whatever copy ran
-`start` — plugin, installer, or a dev build — is the one the agent and the
-navigator find. A separate CLI install remains optional, for running `co-review`
-in shells outside a session.
+This entry replaces the earlier §15 ("sessions put the launching binary on the
+panes' PATH"); that design is obsolete and its mechanism is deleted.
+
+The actual requirement was never PATH manipulation; it was **exact executable
+identity**: every session must know the exact `co-review` that created it, and
+the agent must invoke exactly that binary. Injecting
+`PATH=<bin-parent>:<inherited PATH>` into the typed pane command was an
+indirect and fragile implementation of it:
+
+- It serialized the user's entire PATH into both `herdr pane run` payloads,
+  which — together with the agent's multi-kilobyte prompt as an argv argument —
+  pushed the typed commands past the ~1 KiB PTY-injection boundary of herdr
+  issue #2862 (macOS/zsh), silently truncating the tail (and the submitting
+  Enter) of both pane commands.
+- PATH lookup could resolve the wrong installation anyway: a plugin's private
+  copy, a user install, and a dev build are all equally named `co-review`.
+
+Sessions now carry the exact executable as `CO_REVIEW_BIN` (the absolute
+`current_exe()` of the process running `start`; a resume re-establishes it),
+and both panes get `CO_REVIEW_BIN` plus `CO_REVIEW_SESSION` through Herdr's
+native `--env` on `workspace create` and `pane split` — small, stable metadata
+that never crosses PTY input. All agent-facing text (prompt, protocol, skill)
+invokes `"$CO_REVIEW_BIN" …` and states that neither variable may be guessed
+and bare `co-review` is not a fallback. `pane run` itself carries only the
+operation: `<abs co-review> view` and `<abs co-review> __launch-agent`.
+
+The prompt moved out of the typed command entirely: `start` writes the fully
+resolved agent argv (`AgentConfig::build_command` output, prompt included) to
+the session's private `agent-launch.json` — argv only, no PATH, no
+`CO_REVIEW_*`, no cwd — and the hidden zero-argument `__launch-agent` reads it
+and execs the argv directly, without a shell (Unix `exec`; spawn/wait with
+propagated status elsewhere). The launcher **fails closed**: it resolves its
+session strictly from `$CO_REVIEW_SESSION` (unset, empty, or invalid is an
+error; it never scans for a sole session), reasserts that validated value into
+the agent process, and re-derives `CO_REVIEW_BIN` from its own `current_exe()`
+just before exec — the launcher was itself invoked by absolute path, so binary
+identity does not depend on the pane shell having preserved the variable.
+
+One behavior change is deliberate and desirable: co-review no longer snapshots
+or overrides PATH. Configured agent executables resolve against the normal
+environment of the Herdr pane after shell initialization. co-review controls
+only its own binary identity through `CO_REVIEW_BIN`. This is consistent with
+the contract that `AgentConfig.command` is argv, not shell syntax —
+aliases/functions were never part of the supported agent-command abstraction,
+and `Command::new()` matches that.
+
+The plugin's PATH symlink (§17/§18) is now strictly a human convenience for
+running `co-review start 123` from a shell; active-session correctness never
+depends on it.
 
 ## 16. The navigator captures the mouse
 
@@ -290,6 +330,11 @@ the detail's maximum scroll. That also gave the detail scroll a real upper bound
 (`J` used to increment forever, and the clamp only happened at render time).
 
 ## 17. Installing the plugin puts `co-review` on the user's PATH
+
+*(2026-09-04 addendum: since §15's rework this symlink is convenience only — it
+exists so a human can type `co-review start 123`. Sessions carry their exact
+binary in `CO_REVIEW_BIN`; this entry is about shell UX, never about session
+correctness.)*
 
 Decision 15 fixed the agent's PATH inside a session, but not the human's: after
 `herdr plugin install`, the README's very next section tells you to run
@@ -332,6 +377,9 @@ and test) for a step that runs twice in a plugin's life. Reconsider if the
 receipt is ever needed for something else.
 
 ## 18. The plugin builds in a staging checkout — link to the final path
+
+*(2026-09-04 addendum: as with §17, the link this entry repairs is human
+convenience only after §15's rework; session correctness never consults it.)*
 
 Decision 17 shipped with a bug: `herdr plugin install` runs the build step in
 `<plugins>/.tmp-install-<pid>-<ms>/checkout/` and only *afterwards* moves that

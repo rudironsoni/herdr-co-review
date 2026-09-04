@@ -129,9 +129,16 @@ impl Herdr {
         exec::capture(&self.bin, args, None)
     }
 
-    /// Create a workspace rooted at `cwd`.
-    pub fn workspace_create(&self, cwd: &str, label: &str) -> Result<Workspace> {
-        let args = build_workspace_create_args(cwd, label);
+    /// Create a workspace rooted at `cwd`, setting `env` (KEY=VALUE pairs) in
+    /// the launched process. Environment travels through Herdr's native `--env`
+    /// channel — never through typed pane input.
+    pub fn workspace_create(
+        &self,
+        cwd: &str,
+        label: &str,
+        env: &[(String, String)],
+    ) -> Result<Workspace> {
+        let args = build_workspace_create_args(cwd, label, env);
         let out = self
             .run_capture(&args)
             .context("herdr workspace create failed")?;
@@ -150,10 +157,17 @@ impl Herdr {
     }
 
     /// Split `pane` to the right, returning the new pane's id. `cwd` pins the
-    /// new pane's working directory (it would otherwise inherit herdr's choice).
-    /// (Herdr can also split down, but the layout only ever splits right.)
-    pub fn pane_split(&self, pane: &str, focus: bool, cwd: Option<&str>) -> Result<PaneId> {
-        let args = build_pane_split_args(pane, focus, cwd);
+    /// new pane's working directory (it would otherwise inherit herdr's
+    /// choice); `env` sets KEY=VALUE pairs in the launched process. (Herdr can
+    /// also split down, but the layout only ever splits right.)
+    pub fn pane_split(
+        &self,
+        pane: &str,
+        focus: bool,
+        cwd: Option<&str>,
+        env: &[(String, String)],
+    ) -> Result<PaneId> {
+        let args = build_pane_split_args(pane, focus, cwd, env);
         let out = self.run_capture(&args).context("herdr pane split failed")?;
         if self.dry_run {
             return Ok(bump_pane(pane));
@@ -298,18 +312,25 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn build_workspace_create_args(cwd: &str, label: &str) -> Vec<String> {
-    vec![
+fn build_workspace_create_args(cwd: &str, label: &str, env: &[(String, String)]) -> Vec<String> {
+    let mut args = vec![
         "workspace".into(),
         "create".into(),
         "--cwd".into(),
         cwd.to_string(),
         "--label".into(),
         label.to_string(),
-    ]
+    ];
+    push_env_args(&mut args, env);
+    args
 }
 
-fn build_pane_split_args(pane: &str, focus: bool, cwd: Option<&str>) -> Vec<String> {
+fn build_pane_split_args(
+    pane: &str,
+    focus: bool,
+    cwd: Option<&str>,
+    env: &[(String, String)],
+) -> Vec<String> {
     let mut args = vec![
         "pane".into(),
         "split".into(),
@@ -324,7 +345,16 @@ fn build_pane_split_args(pane: &str, focus: bool, cwd: Option<&str>) -> Vec<Stri
     if !focus {
         args.push("--no-focus".into());
     }
+    push_env_args(&mut args, env);
     args
+}
+
+/// Render repeated `--env KEY=VALUE` arguments.
+fn push_env_args(args: &mut Vec<String>, env: &[(String, String)]) {
+    for (k, v) in env {
+        args.push("--env".into());
+        args.push(format!("{k}={v}"));
+    }
 }
 
 fn build_pane_run_args(pane: &str, command: &str) -> Vec<String> {
@@ -504,19 +534,27 @@ mod tests {
 
     #[test]
     fn arg_builders() {
+        let env = vec![
+            ("CO_REVIEW_SESSION".to_string(), "/s dir".to_string()),
+            ("CO_REVIEW_BIN".to_string(), "/b/co-review".to_string()),
+        ];
         assert_eq!(
-            build_workspace_create_args("/tmp/wt", "co-review-1"),
+            build_workspace_create_args("/tmp/wt", "co-review-1", &env),
             vec![
                 "workspace",
                 "create",
                 "--cwd",
                 "/tmp/wt",
                 "--label",
-                "co-review-1"
+                "co-review-1",
+                "--env",
+                "CO_REVIEW_SESSION=/s dir",
+                "--env",
+                "CO_REVIEW_BIN=/b/co-review"
             ]
         );
         assert_eq!(
-            build_pane_split_args("w1:p1", false, Some("/tmp/wt")),
+            build_pane_split_args("w1:p1", false, Some("/tmp/wt"), &env),
             vec![
                 "pane",
                 "split",
@@ -525,9 +563,17 @@ mod tests {
                 "right",
                 "--cwd",
                 "/tmp/wt",
-                "--no-focus"
+                "--no-focus",
+                "--env",
+                "CO_REVIEW_SESSION=/s dir",
+                "--env",
+                "CO_REVIEW_BIN=/b/co-review"
             ]
         );
+        // No env → no --env flags.
+        assert!(!build_workspace_create_args("/tmp/wt", "l", &[])
+            .iter()
+            .any(|a| a == "--env"));
         assert_eq!(
             build_pane_run_args("w1:p2", "co-review view"),
             vec!["pane", "run", "w1:p2", "co-review view"]
@@ -558,9 +604,11 @@ mod tests {
             bin: "herdr".into(),
             dry_run: true,
         };
-        let ws = h.workspace_create("/tmp", "x").unwrap();
+        let ws = h.workspace_create("/tmp", "x", &[]).unwrap();
         assert_eq!(ws.first_pane, "w1:p1");
-        let p2 = h.pane_split(&ws.first_pane, false, Some("/tmp")).unwrap();
+        let p2 = h
+            .pane_split(&ws.first_pane, false, Some("/tmp"), &[])
+            .unwrap();
         assert_eq!(p2, "w1:p2");
         // these are no-ops in dry-run and must not error
         h.pane_run(&p2, &["co-review".into(), "view".into()])

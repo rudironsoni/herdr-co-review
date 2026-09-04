@@ -63,6 +63,8 @@ fn co_review_env(
     for (k, v) in envs {
         cmd.env(k, v);
     }
+    // Explicitly control session identity: unset unless a session is given.
+    cmd.env_remove("CO_REVIEW_SESSION");
     if let Some(s) = session {
         cmd.env("CO_REVIEW_SESSION", s);
     }
@@ -426,4 +428,303 @@ fn completions_generate_for_each_shell() {
         out.contains(".TH co-review"),
         "man page missing roff header"
     );
+}
+
+#[test]
+fn start_writes_launch_spec_and_identity_env() {
+    if !have_git() {
+        eprintln!("git unavailable; skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (home, work) = make_pr_repo(root.path());
+    let session = home.join("sessions").join("owner-repo-1");
+
+    let (_o, err, ok) = co_review(&home, None, &work, &["start", "owner/repo#1"]);
+    assert!(ok, "start failed: {err}");
+
+    // The private launch spec carries argv only — with the full prompt inside
+    // — and none of PATH/CO_REVIEW_SESSION/CO_REVIEW_BIN.
+    let spec_path = session.join("agent-launch.json");
+    assert!(spec_path.is_file(), "agent-launch.json not written");
+    let spec = std::fs::read_to_string(&spec_path).unwrap();
+    assert!(spec.contains("\"argv\""));
+    assert!(
+        spec.contains("co-reviewing pull request"),
+        "the full prompt must live in the spec"
+    );
+    // argv only: no PATH transport, no structured identity fields (the serde
+    // shape is enforced by unit tests; the prompt may *mention* variables).
+    assert!(!spec.contains("PATH="), "PATH must not appear in the spec");
+    assert!(!spec.contains("\"session\""));
+    assert!(!spec.contains("\"cwd\""));
+
+    // Identity travels through Herdr's --env on create AND split; PATH never
+    // appears in anything co-review drives.
+    let bin_flag = format!("--env CO_REVIEW_BIN={}", bin());
+    assert_eq!(
+        err.matches(&bin_flag).count(),
+        2,
+        "CO_REVIEW_BIN must be set on workspace create and pane split:\n{err}"
+    );
+    assert!(err.contains("--env CO_REVIEW_SESSION="));
+    assert!(!err.contains("PATH="), "no PATH transport:\n{err}");
+
+    // pane run carries only the operation: short, no session path, no prompt,
+    // no --session argument.
+    let pane_runs: Vec<&str> = err.lines().filter(|l| l.contains("pane run")).collect();
+    assert_eq!(pane_runs.len(), 2, "expected two pane run lines:\n{err}");
+    for line in &pane_runs {
+        assert!(
+            !line.contains("--session"),
+            "no --session in pane run: {line}"
+        );
+        assert!(
+            !line.contains(session.to_str().unwrap()),
+            "session path must not be typed: {line}"
+        );
+        assert!(
+            !line.contains("co-reviewing pull request"),
+            "prompt must not be typed: {line}"
+        );
+        assert!(line.len() < 512, "pane run must stay tiny: {line}");
+    }
+    assert!(
+        pane_runs.iter().any(|l| l.contains("__launch-agent")),
+        "agent pane runs __launch-agent:\n{err}"
+    );
+
+    // end removes the private launch state with the session.
+    let (_o, err, ok) = co_review(&home, None, &work, &["end", "owner/repo#1", "--force"]);
+    assert!(ok, "end failed: {err}");
+    assert!(
+        !spec_path.exists(),
+        "agent-launch.json must be gone after end"
+    );
+    assert!(!session.exists());
+}
+
+/// PATH size/composition is irrelevant to session orchestration now: a huge,
+/// duplicate-ridden PATH changes nothing (git still needs a working PATH, so
+/// the noise is appended, not substituted).
+#[test]
+fn start_is_independent_of_path() {
+    if !have_git() {
+        eprintln!("git unavailable; skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (home, work) = make_pr_repo(root.path());
+
+    let real = std::env::var("PATH").unwrap_or_default();
+    let noise: Vec<std::ffi::OsString> = (0..300)
+        .map(|i| format!("/noise/dir{i}-{i}").into())
+        .collect();
+    let mut entries = std::env::split_paths(&real).map(|p| p.into_os_string());
+    let all: Vec<std::ffi::OsString> = entries
+        .by_ref()
+        .chain(noise.iter().cloned())
+        .chain(noise.iter().cloned())
+        .collect();
+    let fat = std::env::join_paths(all).unwrap();
+
+    let (_o, err, ok) = co_review_env(
+        &home,
+        None,
+        &work,
+        &["start", "owner/repo#1"],
+        &[("PATH", fat.to_str().unwrap())],
+    );
+    assert!(ok, "start failed with a huge PATH: {err}");
+    assert!(!err.contains("/noise/dir0-0"), "PATH leaked:\n{err}");
+    assert!(!err.contains("PATH="), "no PATH transport:\n{err}");
+
+    let (_o, err, ok) = co_review(&home, None, &work, &["end", "owner/repo#1", "--force"]);
+    assert!(ok, "end failed: {err}");
+}
+
+/// `__launch-agent` resolves the session strictly from $CO_REVIEW_SESSION:
+/// missing, empty, or wrong means fail closed — never the sole session on disk.
+#[test]
+fn launch_agent_fails_closed_without_session_env() {
+    if !have_git() {
+        eprintln!("git unavailable; skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (home, work) = make_pr_repo(root.path());
+    let (_o, err, ok) = co_review(&home, None, &work, &["start", "owner/repo#1"]);
+    assert!(ok, "start failed: {err}");
+
+    // Exactly one session exists on disk — it must NOT be picked up.
+    let (_o, err, ok) = co_review(&home, None, &work, &["__launch-agent"]);
+    assert!(!ok, "launch without CO_REVIEW_SESSION must fail");
+    assert!(
+        err.contains("CO_REVIEW_SESSION"),
+        "error must name it: {err}"
+    );
+
+    let wrong = root.path().join("nope");
+    let (_o, err, ok) = co_review(&home, Some(&wrong), &work, &["__launch-agent"]);
+    assert!(!ok, "launch with a wrong CO_REVIEW_SESSION must fail");
+    assert!(
+        err.contains("CO_REVIEW_SESSION"),
+        "error must name it: {err}"
+    );
+
+    // The hidden command takes no --session argument; one must not be
+    // silently ignored.
+    let (_o, err, ok) = co_review(
+        &home,
+        None,
+        &work,
+        &["__launch-agent", "--session", "/whatever"],
+    );
+    assert!(!ok, "--session must be an unknown argument here");
+    assert!(
+        err.contains("--session") || err.contains("unexpected"),
+        "the error must point at the argument: {err}"
+    );
+
+    let (_o, err, ok) = co_review(&home, None, &work, &["end", "owner/repo#1", "--force"]);
+    assert!(ok, "end failed: {err}");
+}
+
+/// The hidden command must not leak into help, completions, or the man page.
+#[test]
+fn launch_agent_is_hidden_from_generated_surfaces() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    for args in [
+        &["--help"][..],
+        &["completions", "zsh"][..],
+        &["completions", "bash"][..],
+        &["man"][..],
+    ] {
+        let (out, err, ok) = co_review(&home, None, root.path(), args);
+        assert!(ok, "{args:?} failed: {err}");
+        assert!(
+            !out.contains("__launch-agent"),
+            "{args:?} must not expose __launch-agent"
+        );
+    }
+}
+
+/// End-to-end launch: the launcher runs the session's resolved argv directly,
+/// with no shell. The configured "agent" is this very binary running
+/// `add-finding --title <prompt>` — a real mutation that only works when the
+/// strictly resolved $CO_REVIEW_SESSION reaches the launched process.
+#[test]
+fn launch_agent_execs_the_resolved_argv() {
+    if !have_git() {
+        eprintln!("git unavailable; skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (home, work) = make_pr_repo(root.path());
+    let session = home.join("sessions").join("owner-repo-1");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "default_agent = \"selftest\"\n[agents.selftest]\ncommand = [{:?}, \"add-finding\", \"--title\", \"{{prompt}}\"]\n",
+            bin()
+        ),
+    )
+    .unwrap();
+
+    let (_o, err, ok) = co_review(&home, None, &work, &["start", "owner/repo#1"]);
+    assert!(ok, "start failed: {err}");
+
+    let (out, err, ok) = co_review(&home, Some(&session), &work, &["__launch-agent"]);
+    assert!(ok, "launch failed: {err}");
+    assert_eq!(out.trim(), "f1", "add-finding prints the new id");
+
+    // The finding's title is the entire default prompt, byte-for-byte —
+    // quotes, unicode, and newlines survive because argv never sees a shell.
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(session.join("state.json")).unwrap())
+            .unwrap();
+    let title = state["findings"][0]["title"].as_str().unwrap();
+    assert!(
+        title.starts_with("You and I are co-reviewing pull request #1 together"),
+        "prompt must reach the agent argv verbatim: {title:.80}..."
+    );
+    assert_eq!(state["findings"][0]["id"], "f1");
+
+    let (_o, err, ok) = co_review(&home, None, &work, &["end", "owner/repo#1", "--force"]);
+    assert!(ok, "end failed: {err}");
+}
+
+/// A resume rewrites the launch spec: the selected prompt/agent may have
+/// changed, and the spec must follow.
+#[test]
+fn resume_regenerates_the_launch_spec() {
+    if !have_git() {
+        eprintln!("git unavailable; skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (home, work) = make_pr_repo(root.path());
+    let session = home.join("sessions").join("owner-repo-1");
+
+    let (_o, err, ok) = co_review(&home, None, &work, &["start", "owner/repo#1"]);
+    assert!(ok, "start failed: {err}");
+    let before = std::fs::read_to_string(session.join("agent-launch.json")).unwrap();
+    assert!(!before.contains("CUSTOM-PROMPT-XYZ"));
+
+    let (_o, err, ok) = co_review(
+        &home,
+        None,
+        &work,
+        &[
+            "start",
+            "owner/repo#1",
+            "--resume",
+            "--prompt",
+            "CUSTOM-PROMPT-XYZ {pr} {protocol}",
+        ],
+    );
+    assert!(ok, "resume failed: {err}");
+    let after = std::fs::read_to_string(session.join("agent-launch.json")).unwrap();
+    assert!(after.contains("CUSTOM-PROMPT-XYZ"));
+    assert_ne!(before, after);
+
+    let (_o, err, ok) = co_review(&home, None, &work, &["end", "owner/repo#1", "--force"]);
+    assert!(ok, "end failed: {err}");
+}
+
+/// --dry-run stays side-effect free and shows the identity contract: env on
+/// both panes, short pane commands, no PATH, no prompt in pane run.
+#[test]
+fn dry_run_writes_nothing_and_shows_the_contract() {
+    if !have_git() {
+        eprintln!("git unavailable; skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (home, work) = make_pr_repo(root.path());
+
+    let (out, err, ok) = co_review(&home, None, &work, &["start", "owner/repo#1", "--dry-run"]);
+    assert!(ok, "dry-run failed: {err}");
+    assert!(
+        !home.join("sessions").exists(),
+        "dry-run must not create the session dir"
+    );
+    assert!(
+        out.contains("agent-launch.json"),
+        "must name what it would write"
+    );
+    assert!(out.contains("--env CO_REVIEW_BIN="));
+    assert!(!out.contains("PATH="), "no PATH injection shown:\n{out}");
+    for line in out.lines().filter(|l| l.contains("pane run")) {
+        assert!(
+            !line.contains("--session"),
+            "no --session in pane run: {line}"
+        );
+        assert!(
+            !line.contains("co-reviewing pull request"),
+            "no prompt in pane run: {line}"
+        );
+    }
 }
