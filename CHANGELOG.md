@@ -1,3 +1,28 @@
+# [2.0.0](https://github.com/rudironsoni/herdr-co-review/compare/v1.8.0...v2.0.0) (2026-09-07)
+
+
+* feat!: store config and state in ~/.co-review ([4abc708](https://github.com/rudironsoni/herdr-co-review/commit/4abc708f1eaad576a1b4e64516210c5b8fe7a0ea))
+
+
+### Bug Fixes
+
+* make co-review agent launch path-independent ([198feb4](https://github.com/rudironsoni/herdr-co-review/commit/198feb4702d9843f8cc483e5e832d82997962bc6)), closes [herdr#2862](https://github.com/herdr/issues/2862)
+* **plugin:** trust release assets only for the upstream checkout ([538add2](https://github.com/rudironsoni/herdr-co-review/commit/538add249a9fefac91b14a631388b57945278863))
+* set plugin id to rudironsoni.co-review ([b315b31](https://github.com/rudironsoni/herdr-co-review/commit/b315b31cafd5a67c8db3c62be46fa8ee9dcc1fcc))
+
+
+### Features
+
+* send overall PR result after triage ([1a8c41d](https://github.com/rudironsoni/herdr-co-review/commit/1a8c41d0264c7df10e025c042fb9485b045b07c1))
+
+
+### BREAKING CHANGES
+
+* reinstall the plugin. Leftover
+plugins/config/elkei24.co-review is unused.
+* existing sessions under Application Support or
+~/.local/state/co-review are not found. Move them to ~/.co-review.
+
 # [1.8.0](https://github.com/elKei24/herdr-co-review/compare/v1.7.1...v1.8.0) (2026-08-20)
 
 
