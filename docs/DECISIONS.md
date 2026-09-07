@@ -517,3 +517,12 @@ the agent to post while findings are still pending (`P` is silent until then).
 
 `x` is not a GitHub reject. It collects an extra task and tells the agent not
 to submit a review. Agent `recommend reject` remains the agent's opinion only.
+
+## 26. Releases publish from this fork (2026-09-07)
+
+semantic-release still targeted `elKei24/herdr-co-review` (`repositoryUrl`,
+`package.json`, `Cargo.toml`) and checked out with `secrets.RELEASE_DEPLOY_KEY`.
+This fork has no that secret and no branch ruleset, so the Release workflow
+could not push a tag here. The checkout now uses `GITHUB_TOKEN`. The repository
+URLs point at `rudironsoni/herdr-co-review`. Plugin install still only trusts
+upstream prebuilt assets (decision 20); a fork checkout builds from source.

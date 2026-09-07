@@ -5,7 +5,7 @@
   "description": "Release and commit-lint tooling for co-review. The product itself is the Rust crate; this package only holds JavaScript devtooling.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/elKei24/herdr-co-review.git"
+    "url": "https://github.com/rudironsoni/herdr-co-review.git"
   },
   "license": "MIT",
   "devDependencies": {
