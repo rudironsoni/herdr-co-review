@@ -53,17 +53,20 @@ by the active session; do not guess their values and do not fall back to bare
    - Bulk alternative: write a JSON array and run `"$CO_REVIEW_BIN" import
      findings.json`.
 
-3. **Hand off.** When every finding is recorded, run:
+3. **Hand off.** When every finding is recorded, record your overall opinion
+   of the PR, then hand off:
 
    ```
+   "$CO_REVIEW_BIN" recommend <approve|request_changes|reject>
    "$CO_REVIEW_BIN" set-status awaiting_review
    ```
 
    Tell the human you're done, then **end your turn**. Do not run
    `"$CO_REVIEW_BIN" wait` or poll in a loop — a blocking command shows you as
    busy while you are only waiting. The navigator messages you when triage is
-   done. If the `set-status` output says every finding is already decided, skip
-   ahead and post right away.
+   done and the human has picked an overall verdict. If the `set-status` output
+   says every finding is already decided, wait for that overall-verdict
+   message instead of posting right away.
 
 4. **Collaborate while the human triages.** The human may message you about a
    specific finding (their messages arrive prefixed like `[co-review f3] …`).
@@ -72,21 +75,23 @@ by the active session; do not guess their values and do not fall back to bare
    `"$CO_REVIEW_BIN" edit f3 --body "…"` (only the fields you pass change), or
    add a new finding.
 
-5. **Post.** When the navigator tells you triage is done (a message like
-   `[co-review] Triage is done — every finding is decided. …`), read the
-   decisions and post:
+5. **Act on the result.** When the navigator tells you triage is done (one
+   message like `[co-review] Triage is done — every finding is decided.
+   Overall: … Findings: …`), read that message. Do not post and do not
+   submit a GitHub review before it.
 
    ```
-   "$CO_REVIEW_BIN" list --json    # inspect each finding's verdict + user_note
+   "$CO_REVIEW_BIN" list --json    # inspect each finding's verdict + user_note + pr_verdict
    ```
 
-   - Post findings whose `verdict` is `approved` or `edited` as inline PR review
-     comments. Respect any `user_note`. For `edited`, incorporate the human's
-     note into what you post.
-   - **Never** post `dismissed` findings. Resolve `needs_discussion` with the
-     human first.
-   - After posting each one: `"$CO_REVIEW_BIN" mark-posted f3 --url <comment-url>`.
-   - Finally: `"$CO_REVIEW_BIN" set-status done`.
+   - If overall is `approve`, `request_changes`, or `reject`: post findings
+     whose `verdict` is `approved` or `edited` as inline PR review comments.
+     Respect any `user_note`. Never post `dismissed` ones. Then
+     `"$CO_REVIEW_BIN" mark-posted f3 --url <comment-url>`, then
+     `gh pr review --approve` / `--request-changes` / `--comment` from the
+     message, then `"$CO_REVIEW_BIN" set-status done`.
+   - If overall is `follow_up`: do the extra task in the message. Do not
+     submit a GitHub review.
 
 ## Reference
 

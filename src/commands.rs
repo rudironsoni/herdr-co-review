@@ -137,7 +137,7 @@ pub fn verdict(args: &VerdictArgs) -> Result<()> {
     })?;
     println!("{} -> {}", args.id, verdict.label());
     if triage_done {
-        println!("all findings decided — post the approved ones");
+        println!("all findings decided — pick the overall verdict in the navigator");
     }
     Ok(())
 }
@@ -239,7 +239,9 @@ pub fn set_status(args: &SetStatusArgs) -> Result<()> {
     // exactly "nothing pending".
     if status == ReviewStatus::AwaitingReview {
         if pending == 0 {
-            println!("all findings already decided — post the approved ones now");
+            println!(
+                "all findings already decided — wait for the overall verdict message from the navigator"
+            );
         } else {
             println!(
                 "{pending} finding(s) pending — end your turn; the navigator will \
@@ -370,6 +372,18 @@ pub fn show(args: &ShowArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn recommend(args: &RecommendArgs) -> Result<()> {
+    let store = open_store(&args.session)?;
+    let verdict = crate::model::OverallVerdict::parse(&args.verdict)
+        .ok_or_else(|| anyhow!("unknown overall verdict '{}'", args.verdict))?;
+    store.update(|state| {
+        state.agent_pr_verdict = Some(verdict);
+        Ok(())
+    })?;
+    println!("agent overall: {}", verdict.label());
+    Ok(())
+}
+
 pub fn wait(args: &WaitArgs) -> Result<()> {
     let store = open_store(&args.session)?;
     let start = std::time::Instant::now();
@@ -381,7 +395,7 @@ pub fn wait(args: &WaitArgs) -> Result<()> {
         // would let `wait` return before any finding is recorded.
         if state.handoff_complete() {
             eprintln!(
-                "all {} finding(s) decided; proceed to post the approved ones",
+                "all {} finding(s) decided; pick the overall verdict in the navigator then post",
                 state.findings.len()
             );
             return Ok(());

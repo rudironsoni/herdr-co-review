@@ -59,6 +59,9 @@ pub enum Command {
     /// Set the review lifecycle status.
     SetStatus(SetStatusArgs),
 
+    /// [agent] Record the agent's overall PR opinion (approve / request_changes / reject).
+    Recommend(RecommendArgs),
+
     /// Print a short status summary for a session.
     Status(SessionArgs),
 
@@ -324,4 +327,12 @@ pub struct SetStatusArgs {
     pub session: SessionArgs,
     /// One of: reviewing, awaiting_review, posting, done.
     pub status: String,
+}
+
+#[derive(Args, Debug)]
+pub struct RecommendArgs {
+    #[command(flatten)]
+    pub session: SessionArgs,
+    /// Overall opinion: approve, request_changes, or reject.
+    pub verdict: String,
 }

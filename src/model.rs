@@ -20,6 +20,17 @@ pub struct State {
     pub session: SessionMeta,
     #[serde(default)]
     pub status: ReviewStatus,
+    /// Overall PR outcome the human picked after triage. Unset until they
+    /// choose approve / request_changes / reject in the navigator.
+    #[serde(default)]
+    pub pr_verdict: Option<OverallVerdict>,
+    /// Agent's overall opinion, recorded with `co-review recommend` before
+    /// hand-off. Informational; the human still picks `pr_verdict`.
+    #[serde(default)]
+    pub agent_pr_verdict: Option<OverallVerdict>,
+    /// Instruction for `OverallVerdict::FollowUp`. Empty unless that verdict.
+    #[serde(default)]
+    pub pr_follow_up: Option<String>,
     #[serde(default)]
     pub findings: Vec<Finding>,
     /// Append-only log of messages the human sent to the agent (for context /
@@ -45,6 +56,9 @@ impl State {
             pr,
             session,
             status: ReviewStatus::Reviewing,
+            pr_verdict: None,
+            agent_pr_verdict: None,
+            pr_follow_up: None,
             findings: Vec::new(),
             chat: Vec::new(),
             next_finding_seq: 0,
@@ -112,6 +126,25 @@ impl State {
     /// navigator's push notification, so the gate has exactly one definition.
     pub fn triage_done(&self) -> bool {
         self.status == ReviewStatus::AwaitingReview && self.handoff_complete()
+    }
+
+    /// Compact finding list for the one-shot message back to the agent.
+    pub fn findings_summary(&self) -> String {
+        if self.findings.is_empty() {
+            return "no findings".to_string();
+        }
+        self.findings
+            .iter()
+            .map(|f| {
+                let mut s = format!("{} {} — {}", f.id, f.verdict.label(), f.title);
+                if let Some(note) = &f.user_note {
+                    s.push_str("; note: ");
+                    s.push_str(note);
+                }
+                s
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
@@ -231,6 +264,63 @@ impl ReviewStatus {
             "awaiting_review" | "awaiting" | "handoff" => Some(ReviewStatus::AwaitingReview),
             "posting" => Some(ReviewStatus::Posting),
             "done" | "complete" | "finished" => Some(ReviewStatus::Done),
+            _ => None,
+        }
+    }
+}
+
+/// Overall outcome after every finding is decided.
+///
+/// `approve` / `request_changes` / `reject` are GitHub review events (`reject`
+/// maps to a comment review). `follow_up` means: do not submit a GitHub
+/// review; do the human's other task instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverallVerdict {
+    Approve,
+    RequestChanges,
+    Reject,
+    FollowUp,
+}
+
+impl OverallVerdict {
+    pub fn label(self) -> &'static str {
+        match self {
+            OverallVerdict::Approve => "approve",
+            OverallVerdict::RequestChanges => "request_changes",
+            OverallVerdict::Reject => "reject",
+            OverallVerdict::FollowUp => "follow_up",
+        }
+    }
+
+    /// GitHub pull-request review event name, if this outcome submits one.
+    pub fn gh_event(self) -> Option<&'static str> {
+        match self {
+            OverallVerdict::Approve => Some("APPROVE"),
+            OverallVerdict::RequestChanges => Some("REQUEST_CHANGES"),
+            OverallVerdict::Reject => Some("COMMENT"),
+            OverallVerdict::FollowUp => None,
+        }
+    }
+
+    /// Flag for `gh pr review`, if this outcome submits one.
+    pub fn gh_flag(self) -> Option<&'static str> {
+        match self {
+            OverallVerdict::Approve => Some("--approve"),
+            OverallVerdict::RequestChanges => Some("--request-changes"),
+            OverallVerdict::Reject => Some("--comment"),
+            OverallVerdict::FollowUp => None,
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<OverallVerdict> {
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "approve" | "approved" | "lgtm" => Some(OverallVerdict::Approve),
+            "request_changes" | "changes" | "request_change" => {
+                Some(OverallVerdict::RequestChanges)
+            }
+            "reject" | "comment" => Some(OverallVerdict::Reject),
+            "follow_up" | "other" | "more" => Some(OverallVerdict::FollowUp),
             _ => None,
         }
     }

@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use crate::diffview::{self, CodeSnippet, LineKind};
 use crate::git::Git;
 use crate::herdr::{AgentState, Herdr};
-use crate::model::{ChatEntry, Location, State, Verdict};
+use crate::model::{ChatEntry, Location, OverallVerdict, State, Verdict};
 use crate::store::Store;
 use crate::tui::syntax::Highlighter;
 
@@ -24,6 +24,8 @@ pub enum Input {
     Note,
     /// Composing a message to send to the agent about the selected finding.
     Chat,
+    /// Extra task for `OverallVerdict::FollowUp` (session-level, not a finding).
+    FollowUp,
 }
 
 /// Which pane the wheel scrolls. Clicking a pane makes it the focused one.
@@ -61,6 +63,8 @@ pub struct App {
 
     pub input: Option<Input>,
     pub input_buffer: String,
+    /// Overlay asking for the overall PR verdict after every finding is decided.
+    pub asking_pr_verdict: bool,
     status_msg: Option<(String, Instant)>,
     pub show_help: bool,
     pub should_quit: bool,
@@ -100,6 +104,7 @@ impl App {
             detail_max_scroll: 0,
             input: None,
             input_buffer: String::new(),
+            asking_pr_verdict: false,
             status_msg: None,
             show_help: false,
             should_quit: false,
@@ -111,6 +116,9 @@ impl App {
         app.reconcile_selection(None);
         app.ensure_code();
         app.spawn_agent_poller();
+        if app.state.triage_done() && app.state.pr_verdict.is_none() {
+            app.prompt_pr_verdict();
+        }
         Ok(app)
     }
 
@@ -204,7 +212,13 @@ impl App {
         // `co-review` commands alike), so the triage-done edge is caught no
         // matter who decided the last finding.
         if !was_done && self.state.triage_done() {
-            self.notify_triage_done();
+            if self.state.pr_verdict.is_some() {
+                self.notify_triage_done();
+            } else {
+                self.prompt_pr_verdict();
+            }
+        } else if !self.state.triage_done() {
+            self.asking_pr_verdict = false;
         }
     }
 
@@ -355,21 +369,77 @@ impl App {
         }
     }
 
+    /// Ask the human for the overall PR verdict. Does not message the agent.
+    fn prompt_pr_verdict(&mut self) {
+        self.asking_pr_verdict = true;
+        self.set_status(
+            "all findings decided — pick overall: a approve  r request changes  x other task",
+        );
+    }
+
+    pub fn cancel_pr_verdict_prompt(&mut self) {
+        self.asking_pr_verdict = false;
+        self.set_status("overall verdict later — press P to pick");
+    }
+
+    /// Store the overall verdict and send the full result to the agent.
+    pub fn submit_pr_verdict(&mut self, verdict: OverallVerdict) {
+        self.commit_pr_result(verdict, None);
+    }
+
+    /// Overlay `x`: collect the extra task, then send the full result.
+    pub fn begin_follow_up(&mut self) {
+        self.asking_pr_verdict = false;
+        self.input = Some(Input::FollowUp);
+        self.input_buffer.clear();
+        self.dirty = true;
+    }
+
+    fn commit_pr_result(&mut self, verdict: OverallVerdict, follow_up: Option<String>) {
+        let follow_up_store = follow_up.clone();
+        let res = self.store.update(|s| {
+            s.pr_verdict = Some(verdict);
+            s.pr_follow_up = follow_up_store;
+            Ok(())
+        });
+        match res {
+            Ok(()) => {
+                self.asking_pr_verdict = false;
+                self.reload_now();
+                self.notify_triage_done();
+            }
+            Err(e) => self.set_status(format!("error: {e}")),
+        }
+    }
+
     /// The triage of a handed-off review just completed: tell the agent to
     /// proceed — it is sitting idle, not polling.
     fn notify_triage_done(&mut self) {
-        match self.deliver_to_agent(crate::protocol::TRIAGE_DONE_MSG) {
-            Ok(true) => self.set_status("all findings decided — told the agent to post"),
-            Ok(false) => {
-                self.set_status("all findings decided — no agent pane wired; nudge it with P")
-            }
+        let Some(verdict) = self.state.pr_verdict else {
+            self.prompt_pr_verdict();
+            return;
+        };
+        let msg = crate::protocol::triage_done_msg(
+            verdict,
+            &self.state.findings_summary(),
+            self.state.pr_follow_up.as_deref(),
+        );
+        match self.deliver_to_agent(&msg) {
+            Ok(true) => self.set_status(format!(
+                "all findings decided — told the agent to post ({})",
+                verdict.label()
+            )),
+            Ok(false) => self.set_status(format!(
+                "all findings decided ({}) — no agent pane wired; nudge it with P",
+                verdict.label()
+            )),
             Err(e) => self.set_status(format!("all findings decided, but agent unreachable: {e}")),
         }
     }
 
     /// Begin collecting input (note or chat) for the selected finding.
     pub fn begin_input(&mut self, kind: Input) {
-        if self.selected_id().is_none() {
+        if kind != Input::FollowUp && self.selected_id().is_none() {
             self.set_status("no finding selected");
             return;
         }
@@ -387,8 +457,12 @@ impl App {
     }
 
     pub fn cancel_input(&mut self) {
+        let was_follow_up = self.input == Some(Input::FollowUp);
         self.input = None;
         self.input_buffer.clear();
+        if was_follow_up && self.state.triage_done() && self.state.pr_verdict.is_none() {
+            self.prompt_pr_verdict();
+        }
     }
 
     pub fn push_input_char(&mut self, c: char) {
@@ -405,6 +479,16 @@ impl App {
             return;
         };
         let text = self.input_buffer.trim().to_string();
+        if kind == Input::FollowUp {
+            if text.is_empty() {
+                self.set_status("type the extra task, or Esc to go back");
+                return;
+            }
+            self.input = None;
+            self.input_buffer.clear();
+            self.commit_pr_result(OverallVerdict::FollowUp, Some(text));
+            return;
+        }
         let Some(id) = self.selected_id() else {
             self.cancel_input();
             return;
@@ -426,6 +510,7 @@ impl App {
                     self.send_chat(&id, &text);
                 }
             }
+            Input::FollowUp => unreachable!(),
         }
         self.cancel_input();
         self.reload_now();
@@ -452,18 +537,18 @@ impl App {
         }
     }
 
-    /// Nudge the agent to post the approved findings.
+    /// After findings are done: open the overall-result overlay, or resend it.
+    /// Does not message the agent while findings are still pending.
     pub fn nudge_post(&mut self) {
-        let msg = if self.state.pending_count() == 0 {
-            crate::protocol::TRIAGE_DONE_MSG
-        } else {
-            "Please post the findings I've already approved; I'll keep triaging the rest."
-        };
-        match self.deliver_to_agent(msg) {
-            Ok(true) => self.set_status("asked the agent to post approved findings"),
-            Ok(false) => self.set_status("no agent pane wired; run `co-review post` yourself"),
-            Err(e) => self.set_status(format!("couldn't reach agent pane: {e}")),
+        if !self.state.triage_done() {
+            self.set_status("finish every finding first, then pick the overall result");
+            return;
         }
+        if self.state.pr_verdict.is_none() {
+            self.prompt_pr_verdict();
+            return;
+        }
+        self.notify_triage_done();
     }
 
     /// Submit a line to the agent's pane. `Ok(true)` delivered, `Ok(false)` when

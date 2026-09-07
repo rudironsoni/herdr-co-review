@@ -484,3 +484,36 @@ The fork's Herdr plugin id was still `elkei24.co-review`, so an install of
 checkout and per-plugin config by that id (`plugins/github/<id>-<hash>/`,
 `plugins/config/<id>/`). The id is now `rudironsoni.co-review`. Reinstall after
 this change; leftover `plugins/config/elkei24.co-review` is unrelated.
+
+## 23. Overall PR verdict after triage (2026-09-07)
+
+The navigator used to inject `TRIAGE_DONE_MSG` the moment every finding was
+decided, telling the agent only to post comments and `set-status done`. That
+left the GitHub review event (approve / request changes / comment) up to the
+agent with no human signal.
+
+After the last finding is decided, the navigator now opens an overlay: `a`
+approve, `r` request changes, `x` reject. The pick is stored as
+`State.pr_verdict` and included in the pane message. The agent posts approved
+findings, then runs `gh pr review` with `--approve`, `--request-changes`, or
+`--comment`. Reject is not a GitHub event: it means a comment review, no
+approve. The overlay is skipped until the human picks; `P` reopens it if they
+deferred.
+
+## 24. Agent records an overall recommendation (2026-09-07)
+
+The human's `pr_verdict` is the GitHub review event. The agent also has an
+opinion of the PR as a whole, separate from per-finding verdicts. That opinion
+is `"$CO_REVIEW_BIN" recommend <approve|request_changes|reject>`, stored as
+`agent_pr_verdict`. The navigator overlay shows it when the human picks the
+final outcome. The agent recommendation never submits the GitHub review.
+
+## 25. One result to the agent, only after the overall pick (2026-09-07)
+
+The overall pick (`a` approve, `r` request changes, `x` follow-up task) happens
+only after every finding is decided. The navigator sends one pane message at
+that point: overall result plus a summary of every finding. It does not ask
+the agent to post while findings are still pending (`P` is silent until then).
+
+`x` is not a GitHub reject. It collects an extra task and tells the agent not
+to submit a review. Agent `recommend reject` remains the agent's opinion only.

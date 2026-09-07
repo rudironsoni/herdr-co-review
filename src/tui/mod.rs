@@ -122,7 +122,7 @@ fn handle_event(app: &mut App, ev: Event) {
 /// cursor); the wheel scrolls whichever pane is focused, after a wheel event
 /// over a pane focuses it too.
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
-    if app.show_help || app.input.is_some() {
+    if app.show_help || app.input.is_some() || app.asking_pr_verdict {
         return;
     }
     let pane = app.pane_at(mouse.column, mouse.row);
@@ -155,8 +155,25 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
         if app.input.is_some() {
             app.cancel_input();
+        } else if app.asking_pr_verdict {
+            app.cancel_pr_verdict_prompt();
         } else {
             app.should_quit = true;
+        }
+        return;
+    }
+
+    if app.asking_pr_verdict && app.input.is_none() {
+        match key.code {
+            KeyCode::Char('a') => app.submit_pr_verdict(crate::model::OverallVerdict::Approve),
+            KeyCode::Char('r') => {
+                app.submit_pr_verdict(crate::model::OverallVerdict::RequestChanges)
+            }
+            KeyCode::Char('x') => app.begin_follow_up(),
+            KeyCode::Esc => app.cancel_pr_verdict_prompt(),
+            KeyCode::Char('?') => app.show_help = !app.show_help,
+            KeyCode::Char('q') => app.should_quit = true,
+            _ => {}
         }
         return;
     }
@@ -461,12 +478,31 @@ mod tests {
             .unwrap();
         let mut app = App::new(store).unwrap();
         app.set_verdict(Verdict::Approved);
-        // No agent pane is wired in tests, so delivery is skipped — but the
-        // completion must be detected and surfaced.
+        // Overlay first — do not message the agent until the overall verdict.
+        assert!(app.asking_pr_verdict);
+        let status = app.status_line().unwrap_or_default().to_string();
+        assert!(
+            status.contains("pick overall"),
+            "expected a PR-verdict prompt, got: {status}"
+        );
+
+        handle_event(
+            &mut app,
+            Event::Key(event::KeyEvent::from(KeyCode::Char('r'))),
+        );
+        assert!(!app.asking_pr_verdict);
+        assert_eq!(
+            app.state.pr_verdict,
+            Some(crate::model::OverallVerdict::RequestChanges)
+        );
         let status = app.status_line().unwrap_or_default().to_string();
         assert!(
             status.contains("all findings decided"),
             "expected a triage-done notification, got: {status}"
+        );
+        assert!(
+            status.contains("request_changes"),
+            "expected the overall verdict in the status, got: {status}"
         );
 
         // Re-deciding an already-complete triage must not re-notify.
@@ -497,6 +533,16 @@ mod tests {
             })
             .unwrap();
         app.poll_reload();
+        assert!(app.asking_pr_verdict);
+        let status = app.status_line().unwrap_or_default().to_string();
+        assert!(
+            status.contains("pick overall"),
+            "expected a PR-verdict prompt, got: {status}"
+        );
+        handle_event(
+            &mut app,
+            Event::Key(event::KeyEvent::from(KeyCode::Char('a'))),
+        );
         let status = app.status_line().unwrap_or_default().to_string();
         assert!(
             status.contains("all findings decided"),
@@ -516,6 +562,12 @@ mod tests {
         assert!(
             !status.contains("all findings decided"),
             "premature notification: {status}"
+        );
+        app.nudge_post();
+        let status = app.status_line().unwrap_or_default().to_string();
+        assert!(
+            status.contains("finish every finding"),
+            "P must not talk to the agent mid-triage: {status}"
         );
     }
 

@@ -188,6 +188,18 @@ fn full_agent_flow() {
     assert_eq!(v["findings"][0]["severity"], "critical");
     assert_eq!(v["findings"][0]["body"], "line 2 changed"); // untouched
 
+    let (out, err, ok) = co_review(
+        &home,
+        Some(&session),
+        &work,
+        &["recommend", "request_changes"],
+    );
+    assert!(ok, "recommend failed: {err}");
+    assert!(out.contains("request_changes"), "{out}");
+    let (out, _e, _ok) = co_review(&home, Some(&session), &work, &["list", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["agent_pr_verdict"], "request_changes");
+
     // hand off while f1 is still pending → the agent is told to end its turn
     let (out, _e, ok) = co_review(
         &home,

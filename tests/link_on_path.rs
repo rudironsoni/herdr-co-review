@@ -95,7 +95,10 @@ fn links_the_binary_into_the_install_dir() {
 #[test]
 fn replaces_its_own_link_after_a_plugin_update() {
     let (root, old, dir) = setup();
-    let new = plugin_binary(root.path(), "herdr/plugins/github/rudironsoni.co-review-new");
+    let new = plugin_binary(
+        root.path(),
+        "herdr/plugins/github/rudironsoni.co-review-new",
+    );
 
     link_into(&old, &dir, root.path());
     let (out, ok) = link_into(&new, &dir, root.path());

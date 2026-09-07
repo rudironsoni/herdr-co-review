@@ -51,6 +51,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help(f, size);
     }
+    if app.asking_pr_verdict {
+        draw_pr_verdict(f, app, size);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -305,6 +308,10 @@ fn input_paragraph(app: &App) -> Paragraph<'static> {
     let (title, prefix) = match app.input {
         Some(Input::Note) => (" note (Enter save · Esc cancel) ", "note> "),
         Some(Input::Chat) => (" message to agent (Enter send · Esc cancel) ", "chat> "),
+        Some(Input::FollowUp) => (
+            " extra task for the agent (Enter send · Esc back) ",
+            "task> ",
+        ),
         None => (" input ", "> "),
     };
     let block = Block::default().borders(Borders::ALL).title(title);
@@ -343,7 +350,7 @@ fn draw_help(f: &mut Frame, size: Rect) {
         Line::from(""),
         Line::from("Collaboration"),
         Line::from("  c  message the agent about this finding (into its pane)"),
-        Line::from("  P  ask the agent to post the approved findings"),
+        Line::from("  P  after all findings: pick/resend the overall result"),
         Line::from(""),
         Line::from("Other"),
         Line::from("  r  force refresh    ?  toggle this help    q / Esc  quit"),
@@ -360,6 +367,42 @@ fn draw_help(f: &mut Frame, size: Rect) {
     let block = Block::default().borders(Borders::ALL).title(" help ");
     f.render_widget(
         Paragraph::new(help)
+            .block(block)
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_pr_verdict(f: &mut Frame, app: &App, size: Rect) {
+    let area = centered_rect(64, 50, size);
+    f.render_widget(Clear, area);
+    let agent_line = match app.state.agent_pr_verdict {
+        Some(v) => format!("Agent recommends: {}", v.label()),
+        None => "Agent has not recorded an overall opinion yet.".to_string(),
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            "overall PR verdict",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(agent_line),
+        Line::from("Every finding is decided. This pick is for the PR, not a finding."),
+        Line::from("The agent is told only after you pick."),
+        Line::from(""),
+        Line::from("  a  approve            gh pr review --approve"),
+        Line::from("  r  request changes    gh pr review --request-changes"),
+        Line::from("  x  ask the agent to do something else"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Esc  pick later with P",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    let block = Block::default().borders(Borders::ALL).title(" PR verdict ");
+    f.render_widget(
+        Paragraph::new(lines)
             .block(block)
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: false }),

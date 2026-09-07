@@ -261,19 +261,25 @@ Your job:
    Repeat `--location path:line` (or `path:start-end`) for every relevant spot.
    The finding shows up live in my navigator the moment you run the command.
 
-3. When you have added all findings, run `"$CO_REVIEW_BIN" set-status
-   awaiting_review`, tell me you're done, and END YOUR TURN — do not run a
-   blocking command or poll. While I triage on the right, I may message you
-   here about specific findings; respond conversationally and, if we agree a
-   finding should change, update it with `"$CO_REVIEW_BIN" verdict <id> ...`
-   or `"$CO_REVIEW_BIN" add-finding` / edit as needed.
+3. When you have added all findings, record your overall opinion of the PR
+   with `"$CO_REVIEW_BIN" recommend <approve|request_changes|reject>`, then
+   run `"$CO_REVIEW_BIN" set-status awaiting_review`, tell me you're done, and
+   END YOUR TURN — do not run a blocking command or poll. While I triage on
+   the right, I may message you here about specific findings; respond
+   conversationally and, if we agree a finding should change, update it with
+   `"$CO_REVIEW_BIN" verdict <id> ...` or `"$CO_REVIEW_BIN" add-finding` /
+   edit as needed.
 
-4. When I have decided every finding, my navigator sends a message into this
-   pane telling you to post (if `set-status` reported that everything is already
-   decided, post right away instead of waiting). Then post the approved findings
-   to GitHub as inline PR review comments (respect my per-finding notes; do NOT
-   post dismissed ones), then run `"$CO_REVIEW_BIN" mark-posted <id> --url
-   <comment-url>` for each. Finally run `"$CO_REVIEW_BIN" set-status done`.
+4. When I have decided every finding, my navigator asks me for an overall
+   result (approve, request_changes, or follow_up). It sends ONE message into
+   this pane only after that pick, with the overall result and every finding
+   verdict. Do not post or submit a GitHub review before that message. Then:
+   if overall is approve or request_changes (or reject), post the approved
+   findings as inline PR review comments (respect my notes; do NOT post
+   dismissed ones), run `"$CO_REVIEW_BIN" mark-posted <id> --url
+   <comment-url>` for each, submit `gh pr review` with the flag from the
+   message, and `"$CO_REVIEW_BIN" set-status done`. If overall is follow_up,
+   do the extra task in the message instead of submitting a GitHub review.
 
 The full contract, including how to read my decisions back, is in {protocol}
 (also available via `"$CO_REVIEW_BIN" protocol`). Read it if anything is unclear.
