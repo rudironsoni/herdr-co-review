@@ -1,15 +1,13 @@
-//! Where co-review keeps its state and worktrees on disk.
+//! Where co-review keeps its config, state, and worktrees on disk.
 //!
-//! Layout (Linux example, under `~/.local/state/co-review`):
+//! Layout (default `$HOME/.co-review`, overridable with `$CO_REVIEW_HOME`):
 //!
 //! ```text
 //! <base>/
+//!   config.toml             optional user config (seeded on plugin install)
 //!   sessions/<slug>/        session dir: state.json, lock, agent-launch.json
 //!   worktrees/<slug>/       the checked-out PR the agent works in
 //! ```
-//!
-//! `<base>` can be overridden with `$CO_REVIEW_HOME` (used by tests and by
-//! anyone who wants everything in one place).
 
 use std::path::PathBuf;
 
@@ -42,18 +40,15 @@ pub fn require_self_bin() -> Result<String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
-/// The base directory for all co-review data.
+/// The base directory for config, sessions, and worktrees.
 pub fn base_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os(HOME_ENV) {
         return Ok(PathBuf::from(dir));
     }
-    let proj = directories::ProjectDirs::from("dev", "herdr", "co-review")
-        .ok_or_else(|| anyhow!("could not determine a home directory for co-review state"))?;
-    // Prefer the XDG state dir; fall back to the data dir on platforms without one.
-    Ok(proj
-        .state_dir()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| proj.data_dir().to_path_buf()))
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow!("could not determine a home directory for co-review"))?;
+    Ok(PathBuf::from(home).join(".co-review"))
 }
 
 pub fn sessions_dir() -> Result<PathBuf> {
@@ -74,14 +69,10 @@ pub fn worktree_path(slug: &str) -> Result<PathBuf> {
     Ok(worktrees_dir()?.join(slug))
 }
 
-/// The user config file path (`~/.config/co-review/config.toml`).
+/// The user config file path (`$CO_REVIEW_HOME/config.toml`, default
+/// `~/.co-review/config.toml`).
 pub fn config_path() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os(HOME_ENV) {
-        return Ok(PathBuf::from(dir).join("config.toml"));
-    }
-    let proj = directories::ProjectDirs::from("dev", "herdr", "co-review")
-        .ok_or_else(|| anyhow!("could not determine a config directory for co-review"))?;
-    Ok(proj.config_dir().join("config.toml"))
+    Ok(base_dir()?.join("config.toml"))
 }
 
 /// The session an internal pane process belongs to, taken strictly from

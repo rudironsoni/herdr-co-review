@@ -117,6 +117,7 @@ fn install(checkout: &Path, home: &Path) -> (String, bool) {
         .env("HOME", home)
         .env("CO_REVIEW_NO_PATH_LINK", "1")
         .env_remove("CO_REVIEW_INSTALL_DIR")
+        .env_remove("CO_REVIEW_HOME")
         .output()
         .expect("spawn bash");
     let text = format!(
@@ -203,4 +204,37 @@ fn a_checkout_without_origin_keeps_the_download_path() {
     let (out, ok) = install(&checkout, &home);
     assert!(ok, "install failed: {out}");
     assert!(out.contains(DOWNLOADED_MARK), "{out}");
+}
+
+/// Plugin install writes `~/.co-review/config.toml` when the file is missing.
+#[test]
+fn install_seeds_config_toml_when_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let checkout = make_checkout(root.path(), None);
+    let home = make_home(root.path());
+
+    let (out, ok) = install(&checkout, &home);
+    assert!(ok, "install failed: {out}");
+    let config = home.join(".co-review").join("config.toml");
+    let text =
+        fs::read_to_string(&config).unwrap_or_else(|_| panic!("missing {}", config.display()));
+    assert!(text.contains("default_agent = \"claude\""), "{text}");
+    assert!(out.contains("Wrote"), "{out}");
+}
+
+/// Plugin update must not overwrite a config.toml the user already has.
+#[test]
+fn install_leaves_existing_config_toml_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    let checkout = make_checkout(root.path(), None);
+    let home = make_home(root.path());
+    let dir = home.join(".co-review");
+    fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("config.toml");
+    fs::write(&config, "keep-me\n").unwrap();
+
+    let (out, ok) = install(&checkout, &home);
+    assert!(ok, "install failed: {out}");
+    assert_eq!(fs::read_to_string(&config).unwrap(), "keep-me\n");
+    assert!(!out.contains("Wrote"), "{out}");
 }

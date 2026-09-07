@@ -95,3 +95,50 @@ fi
 "${bindir}/co-review" --version
 
 bash "${root}/scripts/link-on-path.sh" "${bindir}/co-review"
+
+# Seed $CO_REVIEW_HOME/config.toml once. Never overwrite a file that already
+# exists (the user may have edited it).
+if [ -n "${CO_REVIEW_HOME:-}" ]; then
+  co_review_home="${CO_REVIEW_HOME}"
+else
+  co_review_home="${HOME}/.co-review"
+fi
+mkdir -p "${co_review_home}"
+config="${co_review_home}/config.toml"
+if [ ! -f "${config}" ]; then
+  cat > "${config}" <<'EOF'
+# Which agent to use when --agent is not given.
+default_agent = "claude"
+
+# The prompt handed to the agent. `{pr}` and `{protocol}` are substituted.
+# Omit to use the built-in prompt. See README and `co-review prompt`.
+# prompt = "..."
+
+# `{prompt}` in a command is replaced with the review prompt; otherwise the
+# prompt is appended as the final argument.
+[agents.claude]
+kind = "claude"
+command = ["claude"]
+
+[agents.codex]
+kind = "codex"
+command = ["codex"]
+
+[agents.gemini]
+kind = "gemini"
+command = ["gemini"]
+
+[agents.cursor]
+kind = "cursor"
+command = ["cursor"]
+
+[agents.amp]
+kind = "amp"
+command = ["amp"]
+
+[agents.opencode]
+kind = "opencode"
+command = ["opencode"]
+EOF
+  echo "Wrote ${config}"
+fi

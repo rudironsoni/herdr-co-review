@@ -242,4 +242,13 @@ mod tests {
         assert!(skill.contains("\"$CO_REVIEW_BIN\" add-finding"));
         assert!(skill.contains("CO_REVIEW_SESSION"));
     }
+
+    #[test]
+    fn readme_shows_the_default_prompt() {
+        let readme = include_str!("../README.md");
+        assert!(
+            readme.contains(DEFAULT_PROMPT),
+            "README.md must include DEFAULT_PROMPT verbatim"
+        );
+    }
 }

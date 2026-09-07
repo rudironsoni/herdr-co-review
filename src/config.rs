@@ -1,4 +1,4 @@
-//! User configuration (`~/.config/co-review/config.toml`).
+//! User configuration (`~/.co-review/config.toml`).
 //!
 //! Everything here has a sensible default, so the file is entirely optional. It
 //! exists to satisfy two explicit asks: a **configurable prompt** (default: run

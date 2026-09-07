@@ -188,7 +188,18 @@ co-review start 123 --resume        # reopen / refresh an existing session
 
 ## Configuration
 
-Optional, at `~/.config/co-review/config.toml`. Everything has a default.
+Config, sessions, and worktrees live under `$CO_REVIEW_HOME`, which defaults to
+`~/.co-review`:
+
+```text
+~/.co-review/config.toml
+~/.co-review/sessions/<slug>/
+~/.co-review/worktrees/<slug>/
+```
+
+`herdr plugin install` writes `config.toml` if that file is missing. Later
+plugin updates leave it alone. `co-review` still runs with built-in defaults if
+the file is absent (for example after `cargo install` or `curl | sh`).
 
 ```toml
 # Which agent to use when --agent is not given.
@@ -210,6 +221,65 @@ command = ["my-tool", "--task", "{prompt}"]
 ```
 
 Built-in agents: `claude`, `codex`, `gemini`, `cursor`, `amp`, `opencode`.
+
+### Built-in default prompt
+
+`co-review prompt` prints this template. `{pr}` is replaced with the PR
+reference (for example `#123`) and `{protocol}` with the path to `CO_REVIEW.md`.
+
+```
+You and I are co-reviewing pull request {pr} together, side by side.
+
+You are in the LEFT pane. In the RIGHT pane I have a navigator where I can see
+each of your findings with its surrounding code, mark it approved / dismissed /
+needs-discussion, and talk to you about it. We drive this review together.
+
+First, the ground rule for every co-review command in this session:
+
+  "$CO_REVIEW_BIN" is set by co-review to the exact executable for this
+  session. ALWAYS invoke co-review through "$CO_REVIEW_BIN" — never a bare
+  `co-review`, which may resolve to a different installation (or nothing).
+  `$CO_REVIEW_BIN` and `$CO_REVIEW_SESSION` are provided by the active
+  co-review session. Do not guess their values and do not fall back to bare
+  `co-review`.
+
+Your job:
+
+1. Do a thorough, high-signal code review of this PR. If you have a `code-review`
+   skill, use it. Focus on correctness bugs first, then real
+   reuse/simplification/efficiency issues. Skip noise.
+
+2. Record EACH finding by running `"$CO_REVIEW_BIN" add-finding` instead of
+   posting anything to GitHub yet. One command per finding, for example:
+
+     "$CO_REVIEW_BIN" add-finding \
+       --title "Off-by-one in page slicing" \
+       --severity high --category correctness \
+       --location src/paginate.rs:42-48 \
+       --body "The end index is inclusive here but exclusive at the call site, so the last row is dropped when the page is full."
+
+   Repeat `--location path:line` (or `path:start-end`) for every relevant spot.
+   The finding shows up live in my navigator the moment you run the command.
+
+3. When you have added all findings, run `"$CO_REVIEW_BIN" set-status
+   awaiting_review`, tell me you're done, and END YOUR TURN — do not run a
+   blocking command or poll. While I triage on the right, I may message you
+   here about specific findings; respond conversationally and, if we agree a
+   finding should change, update it with `"$CO_REVIEW_BIN" verdict <id> ...`
+   or `"$CO_REVIEW_BIN" add-finding` / edit as needed.
+
+4. When I have decided every finding, my navigator sends a message into this
+   pane telling you to post (if `set-status` reported that everything is already
+   decided, post right away instead of waiting). Then post the approved findings
+   to GitHub as inline PR review comments (respect my per-finding notes; do NOT
+   post dismissed ones), then run `"$CO_REVIEW_BIN" mark-posted <id> --url
+   <comment-url>` for each. Finally run `"$CO_REVIEW_BIN" set-status done`.
+
+The full contract, including how to read my decisions back, is in {protocol}
+(also available via `"$CO_REVIEW_BIN" protocol`). Read it if anything is unclear.
+
+Start the review now.
+```
 
 ## The agent contract
 

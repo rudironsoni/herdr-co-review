@@ -460,3 +460,19 @@ run) keeps the historical download path. The upstream fast path is unchanged
 actually be honored. The trade cost is that fork/branch installs always need
 Rust and a compile; that is the price of the binary provably coming from the
 code that was checked out.
+
+## 21. One home directory: `~/.co-review` (2026-09-07)
+
+Config used `directories::ProjectDirs`, which on macOS is
+`~/Library/Application Support/dev.herdr.co-review/config.toml` while the README
+documented `~/.config/co-review/config.toml`. Session state used the same crate's
+state/data dir (`~/.local/state/co-review` on Linux, Application Support on
+macOS). Three different roots for one tool.
+
+Everything now lives under `$CO_REVIEW_HOME`, default `$HOME/.co-review`:
+`config.toml`, `sessions/`, `worktrees/`. The `directories` crate is gone.
+
+The plugin build step (`scripts/install-binary.sh`) writes `config.toml` when
+the file is missing so a plugin-first install has an editable file. A later
+update does not overwrite it. `curl | sh` and `cargo install` do not seed the
+file; a missing file still loads `Config::default()`.
