@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-const PLUGIN: &str = "herdr/plugins/github/elkei24.co-review-abc";
+const PLUGIN: &str = "herdr/plugins/github/rudironsoni.co-review-abc";
 
 fn script() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/link-on-path.sh")
@@ -95,7 +95,7 @@ fn links_the_binary_into_the_install_dir() {
 #[test]
 fn replaces_its_own_link_after_a_plugin_update() {
     let (root, old, dir) = setup();
-    let new = plugin_binary(root.path(), "herdr/plugins/github/elkei24.co-review-new");
+    let new = plugin_binary(root.path(), "herdr/plugins/github/rudironsoni.co-review-new");
 
     link_into(&old, &dir, root.path());
     let (out, ok) = link_into(&new, &dir, root.path());
@@ -126,16 +126,16 @@ fn links_to_the_final_plugin_dir_when_built_in_a_staging_checkout() {
     let (root, src, dir) = setup_at(staging);
     fs::write(
         root.path().join(staging).join("herdr-plugin.toml"),
-        "id = \"elkei24.co-review\"\nname = \"co-review\"\n",
+        "id = \"rudironsoni.co-review\"\nname = \"co-review\"\n",
     )
     .unwrap();
 
     let (out, ok) = link_into(&src, &dir, root.path());
     assert!(ok, "script failed: {out}");
-    // sha256("elkei24.co-review")[..12]
+    // sha256("rudironsoni.co-review")[..12]
     let expected = root
         .path()
-        .join("herdr/plugins/github/elkei24.co-review-cd7e469ad4bb/bin/co-review");
+        .join("herdr/plugins/github/rudironsoni.co-review-5078ddaccfaf/bin/co-review");
     assert_eq!(fs::read_link(dir.join("co-review")).unwrap(), expected);
 }
 

@@ -476,3 +476,11 @@ The plugin build step (`scripts/install-binary.sh`) writes `config.toml` when
 the file is missing so a plugin-first install has an editable file. A later
 update does not overwrite it. `curl | sh` and `cargo install` do not seed the
 file; a missing file still loads `Config::default()`.
+
+## 22. Plugin id is `rudironsoni.co-review` (2026-09-07)
+
+The fork's Herdr plugin id was still `elkei24.co-review`, so an install of
+`rudironsoni/herdr-co-review` registered as the upstream plugin. Herdr keys the
+checkout and per-plugin config by that id (`plugins/github/<id>-<hash>/`,
+`plugins/config/<id>/`). The id is now `rudironsoni.co-review`. Reinstall after
+this change; leftover `plugins/config/elkei24.co-review` is unrelated.

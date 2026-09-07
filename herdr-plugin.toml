@@ -5,7 +5,7 @@
 # lays out the split-screen for it. The canonical entry point is still the shell
 # command `co-review start <pr>`, run from inside your repo checkout.
 
-id = "elkei24.co-review"
+id = "rudironsoni.co-review"
 name = "co-review"
 version = "1.8.0"
 min_herdr_version = "0.8.0"
