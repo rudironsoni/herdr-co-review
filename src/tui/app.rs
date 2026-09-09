@@ -372,19 +372,46 @@ impl App {
     /// Ask the human for the overall PR verdict. Does not message the agent.
     fn prompt_pr_verdict(&mut self) {
         self.asking_pr_verdict = true;
-        self.set_status(
-            "all findings decided — pick overall: a approve  r request changes  x other task",
-        );
+        let derived = self.state.derived_overall();
+        self.set_status(format!(
+            "all findings decided — derived {} — Enter submit  x another loop",
+            derived.label()
+        ));
+    }
+
+    /// Confirm the derived GitHub event and tell the agent.
+    pub fn submit_derived_pr_verdict(&mut self) {
+        let verdict = self.state.derived_overall();
+        self.commit_pr_result(verdict, None);
+    }
+
+    /// Toggle blocking / non-blocking on the selected finding.
+    pub fn toggle_impact(&mut self) {
+        let Some(id) = self.selected_id() else {
+            self.set_status("no finding selected");
+            return;
+        };
+        let res = self.store.update(|s| {
+            if let Some(f) = s.finding_mut(&id) {
+                f.impact = f.impact.toggle();
+                f.touch();
+            }
+            Ok(())
+        });
+        match res {
+            Ok(()) => {
+                self.reload_now();
+                if let Some(f) = self.state.finding(&id) {
+                    self.set_status(format!("{id} impact → {}", f.impact.label()));
+                }
+            }
+            Err(e) => self.set_status(format!("error: {e}")),
+        }
     }
 
     pub fn cancel_pr_verdict_prompt(&mut self) {
         self.asking_pr_verdict = false;
         self.set_status("overall verdict later — press P to pick");
-    }
-
-    /// Store the overall verdict and send the full result to the agent.
-    pub fn submit_pr_verdict(&mut self, verdict: OverallVerdict) {
-        self.commit_pr_result(verdict, None);
     }
 
     /// Overlay `x`: collect the extra task, then send the full result.

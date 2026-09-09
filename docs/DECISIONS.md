@@ -526,3 +526,49 @@ This fork has no that secret and no branch ruleset, so the Release workflow
 could not push a tag here. The checkout now uses `GITHUB_TOKEN`. The repository
 URLs point at `rudironsoni/herdr-co-review`. Plugin install still only trusts
 upstream prebuilt assets (decision 20); a fork checkout builds from source.
+
+## 27. Finding verdicts match GitHub review comments (2026-09-09)
+
+Decisions 23–25 split finding triage from the overall GitHub event, but the
+words collided. Finding `approve` sounded like PR approve. CLI `reject` on a
+finding meant dismiss. Overall `reject` meant a comment review and had no
+overlay key. Request-changes was only a whole-PR flag, with findings still
+labeled `approved`.
+
+Finding verdicts are now:
+
+- `validated` — keep as a non-blocking review comment (`v` / `a`; old
+  `approved` still parses and deserializes)
+- `dismissed` — drop; do not post
+- `rejected` — keep as a blocking requested change (`x`)
+- `edited` — validated after the human changed the text
+- chat (`c`) is not a verdict; the finding stays `pending`
+
+`needs_discussion` is gone as a finishing state. On-disk it reads as `pending`.
+
+Overall outcomes are GitHub events: `approve`, `comment` (was `reject`; overlay
+`c`), `request_changes`, `follow_up` (another loop, no GitHub review). Overlay
+keys still do not rewrite finding verdicts. The overlay shows a hint from the
+finding mix (any rejected → request_changes; else any validated/edited →
+comment; else approve) plus the agent's `recommend`. The human still picks.
+
+The one pane message after that pick lists the new labels. The agent posts
+`validated`, `rejected`, and `edited` findings, never `dismissed`. Schema
+version is 2.
+
+## 28. Impact on the finding, one GitHub review (2026-09-09)
+
+§27 put request-changes on the finding as `rejected`. That mixed "is this
+comment real?" with "should merge wait?". A GitHub review is one submit:
+inline comments, a review body, and one event.
+
+A finding now has `impact` (`blocking` | `non_blocking`), set by the agent
+(`add-finding --impact`) and toggled in the navigator (`b`). The human only
+validates or dismisses. The event is derived from **validated** findings:
+any blocking → `REQUEST_CHANGES`; only non-blocking → `COMMENT`; none →
+`APPROVE`. Overlay Enter confirms that event; `x` is another loop.
+
+`"$CO_REVIEW_BIN" post` submits **one** `POST .../pulls/{n}/reviews`:
+located findings become `comments[]`; the rest go in `body`. Do not post
+per-line comments and then `gh pr review`. A 422 on a line folds those
+inlines into the body and retries once. Navigator still does not call GitHub.

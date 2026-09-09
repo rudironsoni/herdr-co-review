@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::util::now_ms;
 
 /// Bumped whenever the on-disk schema changes in an incompatible way.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The entire persisted state of a co-review session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,8 +20,8 @@ pub struct State {
     pub session: SessionMeta,
     #[serde(default)]
     pub status: ReviewStatus,
-    /// Overall PR outcome the human picked after triage. Unset until they
-    /// choose approve / request_changes / reject in the navigator.
+    /// Overall PR outcome after triage. Unset until the human confirms the
+    /// derived event or picks follow_up.
     #[serde(default)]
     pub pr_verdict: Option<OverallVerdict>,
     /// Agent's overall opinion, recorded with `co-review recommend` before
@@ -80,7 +80,7 @@ impl State {
         self.findings.iter_mut().find(|f| f.id == id)
     }
 
-    /// Findings the human approved (or edited) and that have not yet been posted.
+    /// Findings the human validated or edited and that have not yet been posted.
     pub fn postable(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|f| f.is_postable())
     }
@@ -101,9 +101,13 @@ impl State {
         for f in &self.findings {
             match f.verdict {
                 Verdict::Pending => c.pending += 1,
-                Verdict::Approved | Verdict::Edited => c.approved += 1,
+                Verdict::Validated | Verdict::Edited => {
+                    c.validated += 1;
+                    if f.impact == Impact::Blocking {
+                        c.blocking_validated += 1;
+                    }
+                }
                 Verdict::Dismissed => c.dismissed += 1,
-                Verdict::NeedsDiscussion => c.needs_discussion += 1,
             }
             if f.posted {
                 c.posted += 1;
@@ -126,6 +130,29 @@ impl State {
     /// navigator's push notification, so the gate has exactly one definition.
     pub fn triage_done(&self) -> bool {
         self.status == ReviewStatus::AwaitingReview && self.handoff_complete()
+    }
+
+    /// GitHub review event from validated findings. Dismissed findings do not
+    /// count. Chat is not a verdict.
+    pub fn derived_overall(&self) -> OverallVerdict {
+        let mut blocking = false;
+        let mut commented = false;
+        for f in &self.findings {
+            if !matches!(f.verdict, Verdict::Validated | Verdict::Edited) {
+                continue;
+            }
+            match f.impact {
+                Impact::Blocking => blocking = true,
+                Impact::NonBlocking => commented = true,
+            }
+        }
+        if blocking {
+            OverallVerdict::RequestChanges
+        } else if commented {
+            OverallVerdict::Comment
+        } else {
+            OverallVerdict::Approve
+        }
     }
 
     /// Compact finding list for the one-shot message back to the agent.
@@ -153,10 +180,11 @@ impl State {
 pub struct Counts {
     pub total: usize,
     pub pending: usize,
-    /// Approved or human-edited (i.e. will be posted).
-    pub approved: usize,
+    /// Validated or human-edited.
+    pub validated: usize,
     pub dismissed: usize,
-    pub needs_discussion: usize,
+    /// Validated or edited findings whose impact is blocking.
+    pub blocking_validated: usize,
     pub posted: usize,
 }
 
@@ -241,9 +269,9 @@ pub enum ReviewStatus {
     Reviewing,
     /// The agent finished; the human is triaging.
     AwaitingReview,
-    /// Approved findings are being posted.
+    /// Postable findings are being posted.
     Posting,
-    /// Everything approved has been posted; session complete.
+    /// Everything postable has been posted; session complete.
     Done,
 }
 
@@ -271,15 +299,16 @@ impl ReviewStatus {
 
 /// Overall outcome after every finding is decided.
 ///
-/// `approve` / `request_changes` / `reject` are GitHub review events (`reject`
-/// maps to a comment review). `follow_up` means: do not submit a GitHub
-/// review; do the human's other task instead.
+/// `approve` / `request_changes` / `comment` are GitHub review events.
+/// `follow_up` means: do not submit a GitHub review; do the human's other task
+/// instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverallVerdict {
     Approve,
     RequestChanges,
-    Reject,
+    #[serde(alias = "reject")]
+    Comment,
     FollowUp,
 }
 
@@ -288,7 +317,7 @@ impl OverallVerdict {
         match self {
             OverallVerdict::Approve => "approve",
             OverallVerdict::RequestChanges => "request_changes",
-            OverallVerdict::Reject => "reject",
+            OverallVerdict::Comment => "comment",
             OverallVerdict::FollowUp => "follow_up",
         }
     }
@@ -298,7 +327,7 @@ impl OverallVerdict {
         match self {
             OverallVerdict::Approve => Some("APPROVE"),
             OverallVerdict::RequestChanges => Some("REQUEST_CHANGES"),
-            OverallVerdict::Reject => Some("COMMENT"),
+            OverallVerdict::Comment => Some("COMMENT"),
             OverallVerdict::FollowUp => None,
         }
     }
@@ -308,7 +337,7 @@ impl OverallVerdict {
         match self {
             OverallVerdict::Approve => Some("--approve"),
             OverallVerdict::RequestChanges => Some("--request-changes"),
-            OverallVerdict::Reject => Some("--comment"),
+            OverallVerdict::Comment => Some("--comment"),
             OverallVerdict::FollowUp => None,
         }
     }
@@ -319,7 +348,7 @@ impl OverallVerdict {
             "request_changes" | "changes" | "request_change" => {
                 Some(OverallVerdict::RequestChanges)
             }
-            "reject" | "comment" => Some(OverallVerdict::Reject),
+            "comment" | "reject" => Some(OverallVerdict::Comment),
             "follow_up" | "other" | "more" => Some(OverallVerdict::FollowUp),
             _ => None,
         }
@@ -333,6 +362,9 @@ pub struct Finding {
     pub title: String,
     #[serde(default)]
     pub severity: Severity,
+    /// Whether a validated finding gates merge (`blocking`) or is a comment.
+    #[serde(default)]
+    pub impact: Impact,
     #[serde(default)]
     pub category: Option<String>,
     /// Markdown explanation of the problem and, ideally, the fix.
@@ -365,6 +397,7 @@ impl Finding {
             id,
             title,
             severity: Severity::default(),
+            impact: Impact::default(),
             category: None,
             body: String::new(),
             suggestion: None,
@@ -382,9 +415,9 @@ impl Finding {
         self.locations.first()
     }
 
-    /// Approved (or human-edited) and not yet posted.
+    /// Validated or human-edited, and not yet posted.
     pub fn is_postable(&self) -> bool {
-        !self.posted && matches!(self.verdict, Verdict::Approved | Verdict::Edited)
+        !self.posted && matches!(self.verdict, Verdict::Validated | Verdict::Edited)
     }
 
     pub fn touch(&mut self) {
@@ -551,20 +584,55 @@ impl Severity {
     }
 }
 
+/// Whether a validated finding gates merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Impact {
+    #[default]
+    NonBlocking,
+    Blocking,
+}
+
+impl Impact {
+    pub fn label(self) -> &'static str {
+        match self {
+            Impact::NonBlocking => "non_blocking",
+            Impact::Blocking => "blocking",
+        }
+    }
+
+    pub fn toggle(self) -> Impact {
+        match self {
+            Impact::NonBlocking => Impact::Blocking,
+            Impact::Blocking => Impact::NonBlocking,
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Impact> {
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "non_blocking" | "nonblocking" | "comment" | "nit" => Some(Impact::NonBlocking),
+            "blocking" | "block" | "gate" => Some(Impact::Blocking),
+            _ => None,
+        }
+    }
+}
+
 /// The human's decision about a finding.
+///
+/// Chat is not a verdict: message the agent, leave the finding `pending`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
-    /// Not yet triaged.
+    /// Not yet triaged. On-disk `needs_discussion` reads as pending.
     #[default]
+    #[serde(alias = "needs_discussion")]
     Pending,
-    /// Accepted; will be posted.
-    Approved,
-    /// Rejected; will not be posted.
+    /// Finding is right. Will be posted. Impact decides the GitHub event.
+    #[serde(alias = "approved", alias = "rejected")]
+    Validated,
+    /// Noise or wrong. Do not post.
     Dismissed,
-    /// Flagged for live discussion with the agent.
-    NeedsDiscussion,
-    /// Accepted after the human edited the finding text; will be posted.
+    /// Validated after the human edited the finding text; will be posted.
     Edited,
 }
 
@@ -572,19 +640,21 @@ impl Verdict {
     pub fn label(self) -> &'static str {
         match self {
             Verdict::Pending => "pending",
-            Verdict::Approved => "approved",
+            Verdict::Validated => "validated",
             Verdict::Dismissed => "dismissed",
-            Verdict::NeedsDiscussion => "discuss",
             Verdict::Edited => "edited",
         }
     }
 
     pub fn parse(s: &str) -> Option<Verdict> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "pending" | "reset" => Some(Verdict::Pending),
-            "approved" | "approve" | "accept" | "ok" | "yes" => Some(Verdict::Approved),
-            "dismissed" | "dismiss" | "reject" | "no" | "wontfix" => Some(Verdict::Dismissed),
-            "needs_discussion" | "discuss" | "discussion" | "?" => Some(Verdict::NeedsDiscussion),
+            "pending" | "reset" | "needs_discussion" | "discuss" | "discussion" | "?" => {
+                Some(Verdict::Pending)
+            }
+            "validated" | "validate" | "approved" | "approve" | "accept" | "ok" | "yes" => {
+                Some(Verdict::Validated)
+            }
+            "dismissed" | "dismiss" | "no" | "wontfix" => Some(Verdict::Dismissed),
             "edited" | "edit" => Some(Verdict::Edited),
             _ => None,
         }
@@ -661,7 +731,7 @@ mod tests {
         s.findings.push(Finding::new("f1".into(), "t".into()));
         assert!(!s.handoff_complete());
         // decided => complete
-        s.findings[0].verdict = Verdict::Approved;
+        s.findings[0].verdict = Verdict::Validated;
         assert!(s.handoff_complete());
     }
 
@@ -669,7 +739,7 @@ mod tests {
     fn triage_done_requires_the_handoff_status() {
         let mut s = State::new(sample_pr(), sample_session());
         let mut f = Finding::new("f1".into(), "t".into());
-        f.verdict = Verdict::Approved;
+        f.verdict = Verdict::Validated;
         s.findings.push(f);
         // all decided, but the agent is still reviewing
         assert!(!s.triage_done());
@@ -683,11 +753,11 @@ mod tests {
     fn postable_filters_correctly() {
         let mut s = State::new(sample_pr(), sample_session());
         let mut f1 = Finding::new("f1".into(), "a".into());
-        f1.verdict = Verdict::Approved;
+        f1.verdict = Verdict::Validated;
         let mut f2 = Finding::new("f2".into(), "b".into());
         f2.verdict = Verdict::Dismissed;
         let mut f3 = Finding::new("f3".into(), "c".into());
-        f3.verdict = Verdict::Approved;
+        f3.verdict = Verdict::Validated;
         f3.posted = true;
         s.findings = vec![f1, f2, f3];
         let ids: Vec<_> = s.postable().map(|f| f.id.clone()).collect();
@@ -750,21 +820,26 @@ mod tests {
             f.posted = posted;
             f
         };
+        let mut f5 = mk("f5", Verdict::Validated, false);
+        f5.impact = Impact::Blocking;
         s.findings = vec![
-            mk("f1", Verdict::Approved, true),
+            mk("f1", Verdict::Validated, true),
             mk("f2", Verdict::Edited, false),
             mk("f3", Verdict::Dismissed, false),
             mk("f4", Verdict::Pending, false),
-            mk("f5", Verdict::NeedsDiscussion, false),
+            f5,
         ];
         let c = s.counts();
         assert_eq!(c.total, 5);
-        assert_eq!(c.approved, 2); // approved + edited
+        assert_eq!(c.validated, 3); // validated + edited + blocking validated
         assert_eq!(c.dismissed, 1);
-        assert_eq!(c.needs_discussion, 1);
+        assert_eq!(c.blocking_validated, 1);
         assert_eq!(c.pending, 1);
         assert_eq!(c.posted, 1);
         assert_eq!(s.pending_count(), 1);
+        let ids: Vec<_> = s.postable().map(|f| f.id.clone()).collect();
+        assert_eq!(ids, vec!["f2", "f5"]);
+        assert_eq!(s.derived_overall(), OverallVerdict::RequestChanges);
     }
 
     #[test]
@@ -786,11 +861,54 @@ mod tests {
 
     #[test]
     fn verdict_and_severity_parse_synonyms() {
-        assert_eq!(Verdict::parse("approve"), Some(Verdict::Approved));
+        assert_eq!(Verdict::parse("approve"), Some(Verdict::Validated));
+        assert_eq!(Verdict::parse("validated"), Some(Verdict::Validated));
+        assert_eq!(Verdict::parse("reject"), None);
+        assert_eq!(Impact::parse("blocking"), Some(Impact::Blocking));
         assert_eq!(Verdict::parse("WONTFIX"), Some(Verdict::Dismissed));
+        assert_eq!(Verdict::parse("discuss"), Some(Verdict::Pending));
+        assert_eq!(
+            OverallVerdict::parse("reject"),
+            Some(OverallVerdict::Comment)
+        );
+        assert_eq!(
+            OverallVerdict::parse("comment"),
+            Some(OverallVerdict::Comment)
+        );
         assert_eq!(Severity::parse("Blocker"), Some(Severity::Critical));
         assert_eq!(Severity::parse("warn"), Some(Severity::Medium));
         assert_eq!(Severity::parse("bogus"), None);
+    }
+
+    #[test]
+    fn old_on_disk_verdicts_deserialize() {
+        let approved: Verdict = serde_json::from_str("\"approved\"").unwrap();
+        assert_eq!(approved, Verdict::Validated);
+        let discuss: Verdict = serde_json::from_str("\"needs_discussion\"").unwrap();
+        assert_eq!(discuss, Verdict::Pending);
+        let reject: OverallVerdict = serde_json::from_str("\"reject\"").unwrap();
+        assert_eq!(reject, OverallVerdict::Comment);
+        let old_finding_reject: Verdict = serde_json::from_str("\"rejected\"").unwrap();
+        assert_eq!(old_finding_reject, Verdict::Validated);
+    }
+
+    #[test]
+    fn derived_overall_from_validated_impact() {
+        let mut s = State::new(sample_pr(), sample_session());
+        let mk = |id: &str, v: Verdict, impact: Impact| {
+            let mut f = Finding::new(id.into(), "t".into());
+            f.verdict = v;
+            f.impact = impact;
+            f
+        };
+        s.findings = vec![mk("f1", Verdict::Dismissed, Impact::Blocking)];
+        assert_eq!(s.derived_overall(), OverallVerdict::Approve);
+        s.findings
+            .push(mk("f2", Verdict::Validated, Impact::NonBlocking));
+        assert_eq!(s.derived_overall(), OverallVerdict::Comment);
+        s.findings
+            .push(mk("f3", Verdict::Validated, Impact::Blocking));
+        assert_eq!(s.derived_overall(), OverallVerdict::RequestChanges);
     }
 
     #[test]

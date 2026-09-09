@@ -7,7 +7,7 @@ Guidance for AI agents working in this repository.
 `co-review` is a Rust CLI + Herdr plugin for **interactive, split-screen PR
 review**: an agent reviews a PR in one Herdr pane and records findings; the human
 triages them in a navigator TUI pane that shows each finding with its related
-code, then the agent posts the approved ones. See `README.md` for the product and
+code, then the agent submits one GitHub review. See `README.md` for the product and
 `docs/DECISIONS.md` for *why* it's built the way it is — read the decision log
 before making structural changes, and add a new dated entry rather than rewriting
 old ones.

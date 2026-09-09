@@ -165,10 +165,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
 
     if app.asking_pr_verdict && app.input.is_none() {
         match key.code {
-            KeyCode::Char('a') => app.submit_pr_verdict(crate::model::OverallVerdict::Approve),
-            KeyCode::Char('r') => {
-                app.submit_pr_verdict(crate::model::OverallVerdict::RequestChanges)
-            }
+            KeyCode::Enter => app.submit_derived_pr_verdict(),
             KeyCode::Char('x') => app.begin_follow_up(),
             KeyCode::Esc => app.cancel_pr_verdict_prompt(),
             KeyCode::Char('?') => app.show_help = !app.show_help,
@@ -209,11 +206,11 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::Char('J') | KeyCode::PageDown => app.scroll_detail_down(),
         KeyCode::Char('K') | KeyCode::PageUp => app.scroll_detail_up(),
 
-        KeyCode::Char('a') => app.set_verdict(Verdict::Approved),
+        KeyCode::Char('v') | KeyCode::Char('a') => app.set_verdict(Verdict::Validated),
         KeyCode::Char('d') => app.set_verdict(Verdict::Dismissed),
-        KeyCode::Char('x') => app.set_verdict(Verdict::NeedsDiscussion),
         KeyCode::Char('u') => app.set_verdict(Verdict::Pending),
         KeyCode::Char('e') => app.set_verdict(Verdict::Edited),
+        KeyCode::Char('b') => app.toggle_impact(),
 
         KeyCode::Char('n') => app.begin_input(Input::Note),
         KeyCode::Char('c') => app.begin_input(Input::Chat),
@@ -477,23 +474,20 @@ mod tests {
             })
             .unwrap();
         let mut app = App::new(store).unwrap();
-        app.set_verdict(Verdict::Approved);
+        app.set_verdict(Verdict::Validated);
         // Overlay first — do not message the agent until the overall verdict.
         assert!(app.asking_pr_verdict);
         let status = app.status_line().unwrap_or_default().to_string();
         assert!(
-            status.contains("pick overall"),
-            "expected a PR-verdict prompt, got: {status}"
+            status.contains("derived"),
+            "expected a derived-review prompt, got: {status}"
         );
 
-        handle_event(
-            &mut app,
-            Event::Key(event::KeyEvent::from(KeyCode::Char('r'))),
-        );
+        handle_event(&mut app, Event::Key(event::KeyEvent::from(KeyCode::Enter)));
         assert!(!app.asking_pr_verdict);
         assert_eq!(
             app.state.pr_verdict,
-            Some(crate::model::OverallVerdict::RequestChanges)
+            Some(crate::model::OverallVerdict::Comment)
         );
         let status = app.status_line().unwrap_or_default().to_string();
         assert!(
@@ -501,7 +495,7 @@ mod tests {
             "expected a triage-done notification, got: {status}"
         );
         assert!(
-            status.contains("request_changes"),
+            status.contains("comment"),
             "expected the overall verdict in the status, got: {status}"
         );
 
@@ -528,7 +522,7 @@ mod tests {
         // Decide the finding outside the TUI (as `co-review verdict` would).
         Store::new(dir.path())
             .update(|s| {
-                s.findings[0].verdict = Verdict::Approved;
+                s.findings[0].verdict = Verdict::Validated;
                 Ok(())
             })
             .unwrap();
@@ -536,13 +530,10 @@ mod tests {
         assert!(app.asking_pr_verdict);
         let status = app.status_line().unwrap_or_default().to_string();
         assert!(
-            status.contains("pick overall"),
-            "expected a PR-verdict prompt, got: {status}"
+            status.contains("derived"),
+            "expected a derived-review prompt, got: {status}"
         );
-        handle_event(
-            &mut app,
-            Event::Key(event::KeyEvent::from(KeyCode::Char('a'))),
-        );
+        handle_event(&mut app, Event::Key(event::KeyEvent::from(KeyCode::Enter)));
         let status = app.status_line().unwrap_or_default().to_string();
         assert!(
             status.contains("all findings decided"),
@@ -557,7 +548,7 @@ mod tests {
         let mut app = App::new(store).unwrap();
         // Status is still `reviewing`: the agent may add more findings, so
         // deciding the only one so far must not trigger the hand-back.
-        app.set_verdict(Verdict::Approved);
+        app.set_verdict(Verdict::Validated);
         let status = app.status_line().unwrap_or_default().to_string();
         assert!(
             !status.contains("all findings decided"),
@@ -576,12 +567,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = seed(dir.path());
         let mut app = App::new(store).unwrap();
-        app.set_verdict(Verdict::Approved);
+        app.set_verdict(Verdict::Validated);
         // In-memory reflects it…
-        assert_eq!(app.state.findings[0].verdict, Verdict::Approved);
+        assert_eq!(app.state.findings[0].verdict, Verdict::Validated);
         // …and it's durable.
         let reread = Store::new(dir.path()).read().unwrap();
-        assert_eq!(reread.findings[0].verdict, Verdict::Approved);
+        assert_eq!(reread.findings[0].verdict, Verdict::Validated);
+    }
+
+    #[test]
+    fn blocking_impact_derives_request_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        store
+            .update(|s| {
+                s.status = crate::model::ReviewStatus::AwaitingReview;
+                Ok(())
+            })
+            .unwrap();
+        let mut app = App::new(store).unwrap();
+        handle_event(
+            &mut app,
+            Event::Key(event::KeyEvent::from(KeyCode::Char('b'))),
+        );
+        assert_eq!(app.state.findings[0].impact, crate::model::Impact::Blocking);
+        handle_event(
+            &mut app,
+            Event::Key(event::KeyEvent::from(KeyCode::Char('v'))),
+        );
+        assert!(app.asking_pr_verdict);
+        handle_event(&mut app, Event::Key(event::KeyEvent::from(KeyCode::Enter)));
+        assert_eq!(
+            app.state.pr_verdict,
+            Some(crate::model::OverallVerdict::RequestChanges)
+        );
     }
 
     /// Not a CI test — a manual snapshot to eyeball the diff-colored code view.

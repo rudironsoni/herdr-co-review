@@ -9,8 +9,8 @@ use clap::{Args, Parser, Subcommand};
     about = "Interactive, split-screen PR co-review between you and your AI agent, inside Herdr.",
     long_about = "co-review turns a PR review into a side-by-side collaboration: your agent \
 reviews in one Herdr pane and records findings; you triage them in a navigator pane that shows \
-each finding with its surrounding code, then talk it over and let the agent post the approved \
-ones. Run `co-review start <pr>` to begin."
+each finding with its surrounding code, then talk it over and let the agent submit one GitHub \
+review. Run `co-review start <pr>` to begin."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -39,7 +39,7 @@ pub enum Command {
     /// Show a single finding together with its related code.
     Show(ShowArgs),
 
-    /// Set a finding's verdict (approved/dismissed/discuss/edited/pending).
+    /// Set a finding's verdict (validated/dismissed/edited/pending).
     Verdict(VerdictArgs),
 
     /// Revise an existing finding's fields (after you and the agent discuss it).
@@ -49,8 +49,8 @@ pub enum Command {
     /// session the navigator messages the agent instead, so it can stay idle).
     Wait(WaitArgs),
 
-    /// Post approved findings to GitHub as inline review comments (fallback for
-    /// the agent; requires a GitHub token).
+    /// Submit one GitHub review from the derived overall event and validated
+    /// findings (inline comments + body). Requires a GitHub token.
     Post(PostArgs),
 
     /// [agent] Record that a finding has been posted.
@@ -59,7 +59,7 @@ pub enum Command {
     /// Set the review lifecycle status.
     SetStatus(SetStatusArgs),
 
-    /// [agent] Record the agent's overall PR opinion (approve / request_changes / reject).
+    /// [agent] Record the agent's overall PR opinion (approve / request_changes / comment).
     Recommend(RecommendArgs),
 
     /// Print a short status summary for a session.
@@ -157,6 +157,10 @@ pub struct AddFindingArgs {
     #[arg(long, default_value = "medium")]
     pub severity: String,
 
+    /// Impact: blocking|non_blocking. Gates merge if the human validates it.
+    #[arg(long, default_value = "non_blocking")]
+    pub impact: String,
+
     /// Free-text category (e.g. correctness, security, simplification).
     #[arg(long)]
     pub category: Option<String>,
@@ -216,7 +220,7 @@ pub struct VerdictArgs {
     pub session: SessionArgs,
     /// Finding id (e.g. `f3`).
     pub id: String,
-    /// Verdict: approved|dismissed|discuss|edited|pending.
+    /// Verdict: validated|dismissed|edited|pending.
     pub verdict: String,
     /// Attach or replace the human note shown to the agent.
     #[arg(long)]
@@ -333,6 +337,6 @@ pub struct SetStatusArgs {
 pub struct RecommendArgs {
     #[command(flatten)]
     pub session: SessionArgs,
-    /// Overall opinion: approve, request_changes, or reject.
+    /// Overall opinion: approve, request_changes, or comment.
     pub verdict: String,
 }

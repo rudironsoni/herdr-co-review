@@ -110,27 +110,17 @@ impl Client {
         parse_pr(owner, repo, number, &value)
     }
 
-    /// Post an inline review comment. Returns the created comment's html URL.
-    pub fn post_review_comment(&self, pr: &PrInfo, comment: &ReviewComment) -> Result<String> {
-        let url = format!("{}/comments", pr_url(&pr.owner, &pr.repo, pr.number));
-        let body = comment.to_json(&pr.head_sha);
+    /// Submit one pull-request review (event + inline comments + body).
+    pub fn submit_review(&self, pr: &PrInfo, review: &PullRequestReview) -> Result<String> {
+        let url = format!("{}/reviews", pr_url(&pr.owner, &pr.repo, pr.number));
         let value = self
-            .post(&url, body)
-            .with_context(|| format!("posting review comment on {}", comment.path))?;
-        html_url(&value)
-    }
-
-    /// Post a general (non-inline) comment on the PR conversation. Used as a
-    /// fallback when an inline comment is rejected (e.g. the line isn't part of
-    /// the diff). Returns the created comment's html URL.
-    pub fn post_issue_comment(&self, pr: &PrInfo, body: &str) -> Result<String> {
-        let url = format!(
-            "{API_ROOT}/repos/{}/{}/issues/{}/comments",
-            pr.owner, pr.repo, pr.number
-        );
-        let value = self
-            .post(&url, json!({ "body": body }))
-            .with_context(|| format!("posting a PR comment on {}", pr.number))?;
+            .post(&url, review.to_json(&pr.head_sha))
+            .with_context(|| {
+                format!(
+                    "submitting review on {}/{}#{}",
+                    pr.owner, pr.repo, pr.number
+                )
+            })?;
         html_url(&value)
     }
 }
@@ -142,6 +132,28 @@ fn html_url(value: &serde_json::Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| anyhow!("GitHub response had no html_url"))
+}
+
+/// One GitHub pull-request review: event, body, inline comments.
+pub struct PullRequestReview {
+    pub event: &'static str,
+    pub body: String,
+    pub comments: Vec<ReviewComment>,
+}
+
+impl PullRequestReview {
+    pub fn to_json(&self, commit_id: &str) -> serde_json::Value {
+        json!({
+            "commit_id": commit_id,
+            "body": self.body,
+            "event": self.event,
+            "comments": self
+                .comments
+                .iter()
+                .map(ReviewComment::to_review_json)
+                .collect::<Vec<_>>(),
+        })
+    }
 }
 
 /// The pieces of an inline review comment.
@@ -161,10 +173,9 @@ impl ReviewComment {
         }
     }
 
-    fn to_json(&self, commit_id: &str) -> serde_json::Value {
+    fn to_review_json(&self) -> serde_json::Value {
         let mut obj = json!({
             "body": self.body,
-            "commit_id": commit_id,
             "path": self.path,
             "line": self.line,
             "side": self.side_str(),
@@ -296,11 +307,19 @@ mod tests {
             start_line: None,
             side: Side::Head,
         };
-        let j = c.to_json("sha1");
+        let j = c.to_review_json();
         assert_eq!(j["side"], "RIGHT");
         assert_eq!(j["line"], 10);
-        assert_eq!(j["commit_id"], "sha1");
         assert!(j.get("start_line").is_none());
+        let review = PullRequestReview {
+            event: "REQUEST_CHANGES",
+            body: "blocking: bug".into(),
+            comments: vec![c],
+        };
+        let rj = review.to_json("sha1");
+        assert_eq!(rj["event"], "REQUEST_CHANGES");
+        assert_eq!(rj["comments"][0]["path"], "a.rs");
+        assert!(rj["comments"][0].get("commit_id").is_none());
     }
 
     #[test]
@@ -312,7 +331,7 @@ mod tests {
             start_line: Some(10),
             side: Side::Base,
         };
-        let j = c.to_json("sha1");
+        let j = c.to_review_json();
         assert_eq!(j["side"], "LEFT");
         assert_eq!(j["start_line"], 10);
         assert_eq!(j["start_side"], "LEFT");
@@ -327,7 +346,7 @@ mod tests {
             start_line: Some(10),
             side: Side::Head,
         };
-        let j = c.to_json("sha1");
+        let j = c.to_review_json();
         assert!(j.get("start_line").is_none());
     }
 

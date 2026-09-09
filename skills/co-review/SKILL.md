@@ -7,7 +7,7 @@ description: >-
   CO_REVIEW_SESSION and CO_REVIEW_BIN are set, or the opening prompt references
   co-review): record each finding with "$CO_REVIEW_BIN" add-finding instead of
   posting, hand off with "$CO_REVIEW_BIN" set-status awaiting_review and end
-  your turn, then post the human-approved findings and mark them posted.
+  your turn, then run "$CO_REVIEW_BIN" post for one GitHub review.
 ---
 
 # co-review (agent side)
@@ -40,11 +40,13 @@ by the active session; do not guess their values and do not fall back to bare
    ```
    "$CO_REVIEW_BIN" add-finding \
      --title "Off-by-one in page slicing" \
-     --severity high --category correctness \
+     --severity high --impact blocking --category correctness \
      --location src/paginate.rs:42-48 \
      --body "The end index is inclusive here but the caller treats it as exclusive, so the last row is dropped on full pages."
    ```
 
+   - `--impact blocking` if a validated finding should request changes. Default
+     `non_blocking`.
    - Repeat `--location path:line` (or `path:start-end`) for every relevant spot.
    - Append `@base` to a location to point at the base version (default: head).
    - Long markdown: `--body-file <file>` or `--body-file -` (stdin).
@@ -57,15 +59,15 @@ by the active session; do not guess their values and do not fall back to bare
    of the PR, then hand off:
 
    ```
-   "$CO_REVIEW_BIN" recommend <approve|request_changes|reject>
+   "$CO_REVIEW_BIN" recommend <approve|request_changes|comment>
    "$CO_REVIEW_BIN" set-status awaiting_review
    ```
 
    Tell the human you're done, then **end your turn**. Do not run
    `"$CO_REVIEW_BIN" wait` or poll in a loop — a blocking command shows you as
    busy while you are only waiting. The navigator messages you when triage is
-   done and the human has picked an overall verdict. If the `set-status` output
-   says every finding is already decided, wait for that overall-verdict
+   done and the human has confirmed the derived GitHub event. If the
+   `set-status` output says every finding is already decided, wait for that
    message instead of posting right away.
 
 4. **Collaborate while the human triages.** The human may message you about a
@@ -84,14 +86,11 @@ by the active session; do not guess their values and do not fall back to bare
    "$CO_REVIEW_BIN" list --json    # inspect each finding's verdict + user_note + pr_verdict
    ```
 
-   - If overall is `approve`, `request_changes`, or `reject`: post findings
-     whose `verdict` is `approved` or `edited` as inline PR review comments.
-     Respect any `user_note`. Never post `dismissed` ones. Then
-     `"$CO_REVIEW_BIN" mark-posted f3 --url <comment-url>`, then
-     `gh pr review --approve` / `--request-changes` / `--comment` from the
-     message, then `"$CO_REVIEW_BIN" set-status done`.
-   - If overall is `follow_up`: do the extra task in the message. Do not
-     submit a GitHub review.
+   - If overall is `approve`, `comment`, or `request_changes`: run
+     `"$CO_REVIEW_BIN" post`. That submits **one** GitHub review: the derived
+     event, inline comments for validated findings that have a location, and
+     the review body for the rest. Then `"$CO_REVIEW_BIN" set-status done`.
+   - If overall is `follow_up`: do the extra task in the message. Do not post.
 
 ## Reference
 
