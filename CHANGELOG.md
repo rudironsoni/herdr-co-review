@@ -1,3 +1,10 @@
+# [2.1.0](https://github.com/rudironsoni/herdr-co-review/compare/v2.0.0...v2.1.0) (2026-09-09)
+
+
+### Features
+
+* derive review from finding impact ([0224eda](https://github.com/rudironsoni/herdr-co-review/commit/0224edae5513b97cdcc7d834152ab8ce9f6fcc97))
+
 # [2.0.0](https://github.com/rudironsoni/herdr-co-review/compare/v1.8.0...v2.0.0) (2026-09-07)
 
 
