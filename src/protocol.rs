@@ -25,10 +25,11 @@ pub fn triage_done_msg(
         verdict.label()
     );
     match (verdict.gh_event(), verdict.gh_flag()) {
-        (Some(event), Some(flag)) => {
+        (Some(event), Some(_flag)) => {
             msg.push_str(&format!(
-                "Post the approved findings to GitHub, mark them posted, then submit a GitHub \
-review with event {event} (`gh pr review {flag}`). Then \"$CO_REVIEW_BIN\" set-status done."
+                "Run \"$CO_REVIEW_BIN\" post — one GitHub review with event {event} \
+(inline comments for findings with a location, others in the review body). \
+Then \"$CO_REVIEW_BIN\" set-status done."
             ));
         }
         _ => {
@@ -53,8 +54,8 @@ pub const PROTOCOL_PLACEHOLDER: &str = "{protocol}";
 pub const DEFAULT_PROMPT: &str = r#"You and I are co-reviewing pull request {pr} together, side by side.
 
 You are in the LEFT pane. In the RIGHT pane I have a navigator where I can see
-each of your findings with its surrounding code, mark it approved / dismissed /
-needs-discussion, and talk to you about it. We drive this review together.
+each of your findings with its surrounding code, mark it validated or dismissed,
+and talk to you about it. We drive this review together.
 
 First, the ground rule for every co-review command in this session:
 
@@ -76,7 +77,7 @@ Your job:
 
      "$CO_REVIEW_BIN" add-finding \
        --title "Off-by-one in page slicing" \
-       --severity high --category correctness \
+       --severity high --impact blocking --category correctness \
        --location src/paginate.rs:42-48 \
        --body "The end index is inclusive here but exclusive at the call site, so the last row is dropped when the page is full."
 
@@ -84,7 +85,7 @@ Your job:
    The finding shows up live in my navigator the moment you run the command.
 
 3. When you have added all findings, record your overall opinion of the PR
-   with `"$CO_REVIEW_BIN" recommend <approve|request_changes|reject>`, then
+   with `"$CO_REVIEW_BIN" recommend <approve|request_changes|comment>`, then
    run `"$CO_REVIEW_BIN" set-status awaiting_review`, tell me you're done, and
    END YOUR TURN — do not run a blocking command or poll. While I triage on
    the right, I may message you here about specific findings; respond
@@ -92,16 +93,16 @@ Your job:
    `"$CO_REVIEW_BIN" verdict <id> ...` or `"$CO_REVIEW_BIN" add-finding` /
    edit as needed.
 
-4. When I have decided every finding, my navigator asks me for an overall
-   result (approve, request_changes, or follow_up). It sends ONE message into
-   this pane only after that pick, with the overall result and every finding
-   verdict. Do not post or submit a GitHub review before that message. Then:
-   if overall is approve or request_changes (or reject), post the approved
-   findings as inline PR review comments (respect my notes; do NOT post
-   dismissed ones), run `"$CO_REVIEW_BIN" mark-posted <id> --url
-   <comment-url>` for each, submit `gh pr review` with the flag from the
-   message, and `"$CO_REVIEW_BIN" set-status done`. If overall is follow_up,
-   do the extra task in the message instead of submitting a GitHub review.
+4. When I have decided every finding, my navigator derives the GitHub review
+   event from validated findings (blocking → request_changes, only
+   non-blocking → comment, none → approve) and asks me to confirm. It sends
+   ONE message into this pane only after that confirm, with the overall
+   result and every finding verdict. Do not post before that message. Then:
+   if overall is approve, comment, or request_changes, run
+   `"$CO_REVIEW_BIN" post` (one GitHub review: inline comments for findings
+   with a location, the rest in the review body; dismissed findings are
+   omitted), then `"$CO_REVIEW_BIN" set-status done`. If overall is
+   follow_up, do the extra task in the message instead of posting.
 
 The full contract, including how to read my decisions back, is in {protocol}
 (also available via `"$CO_REVIEW_BIN" protocol`). Read it if anything is unclear.
@@ -130,7 +131,7 @@ guess their values and do not fall back to bare `co-review`.
 1. **Review.** Produce high-signal findings. Correctness bugs first.
 2. **Record.** One `"$CO_REVIEW_BIN" add-finding` per finding (see below).
    Findings appear live in the human's navigator.
-3. **Hand off.** `"$CO_REVIEW_BIN" recommend <approve|request_changes|reject>`
+3. **Hand off.** `"$CO_REVIEW_BIN" recommend <approve|request_changes|comment>`
    with your overall opinion of the PR, then `"$CO_REVIEW_BIN" set-status
    awaiting_review`, tell the human you are done, and end your turn. The
    command prints whether findings are still pending or everything is already
@@ -138,20 +139,20 @@ guess their values and do not fall back to bare `co-review`.
 4. **Collaborate.** While the human triages, they may message you. Adjust
    findings if you both agree.
 5. **Act on the result.** The navigator messages you once, after every
-   finding is decided *and* the human picks an overall result. That message
-   includes the overall verdict and a summary of every finding. Until it
-   arrives, do not post and do not submit a GitHub review. Then:
-   - `approve` / `request_changes` / `reject`: post approved findings, mark
-     them posted, `gh pr review` with the flag in the message, then
+   finding is decided *and* the human confirms the derived GitHub event. That
+   message includes the overall verdict and a summary of every finding. Until
+   it arrives, do not post. Then:
+   - `approve` / `comment` / `request_changes`: `"$CO_REVIEW_BIN" post` (one
+     GitHub review: inline comments + body + event), then
      `"$CO_REVIEW_BIN" set-status done`.
-   - `follow_up`: do the extra task in the message. Do not submit a GitHub
-     review.
+   - `follow_up`: do the extra task in the message. Do not post.
 
 ## Recording a finding
 
     "$CO_REVIEW_BIN" add-finding \
       --title "<short title>" \
       --severity <critical|high|medium|low|nit> \
+      --impact <blocking|non_blocking> \
       --category <free text, e.g. correctness|security|simplification|efficiency> \
       --location <path:line | path:start-end>   (repeatable) \
       --body "<markdown explanation, ideally with the fix>" \
@@ -161,28 +162,33 @@ guess their values and do not fall back to bare `co-review`.
 - Add `@base` to a location (e.g. `src/x.rs:10@base`) to point at the base
   version instead of the PR's head; the default is the head.
 - Long markdown: use `--body-file <path>` or `--body-file -` to read stdin.
+- `--impact blocking` means: if the human validates this finding, the GitHub
+  review event is request_changes. Default is `non_blocking`.
 - Bulk: `"$CO_REVIEW_BIN" import <file.json>` ingests a JSON array of findings
   using the same field names as the state schema (`title`, `severity`,
-  `category`, `body`, `suggestion`, `locations: [{file, start_line, end_line,
-  side}]`).
+  `impact`, `category`, `body`, `suggestion`, `locations: [{file, start_line,
+  end_line, side}]`).
 
 `add-finding` prints the new finding id (e.g. `f3`).
 
 ## Reading the human's decisions
 
 - `"$CO_REVIEW_BIN" list --json` prints the full state, including each
-  finding's `verdict` (`pending`, `approved`, `dismissed`,
-  `needs_discussion`, `edited`) and any `user_note` the human attached.
+  finding's `verdict` (`pending`, `validated`, `dismissed`, `edited`),
+  `impact`, and any `user_note` the human attached.
 - You do not need to poll for the hand-off: once every finding is decided and
-  the human picks an overall result, the navigator sends one message
+  the human confirms the derived event, the navigator sends one message
   `[co-review] Triage is done … Overall: … Findings: …` into your pane.
 - `"$CO_REVIEW_BIN" wait` blocks until every finding has a verdict other than
   `pending` (add `--timeout <ms>` to bound it). It is a fallback for setups
   where the navigator cannot message you (no Herdr, scripted runs); in a normal
   session, end your turn instead — a blocking `wait` shows you as busy while
   you are only waiting.
-- Only post findings whose verdict is `approved` or `edited`. Never post
-  `dismissed` ones. For `needs_discussion`, resolve it with the human first.
+- `"$CO_REVIEW_BIN" post` submits one GitHub review. Validated and edited
+  findings with a location become inline comments on that review. Findings
+  without a location go in the review body. Never include `dismissed`
+  findings. Chat is not a verdict; a finding stays `pending` until the human
+  validates or dismisses it.
 
 ## Updating and posting
 
@@ -196,13 +202,16 @@ guess their values and do not fall back to bare `co-review`.
   `--clear-locations` to remove one). Editing a decided finding resets its
   verdict to `pending` so the revised text gets re-triaged; pass
   `--keep-verdict` to override.
-- `"$CO_REVIEW_BIN" mark-posted <id> --url <comment-url>` — record that you
-  posted it.
+- `"$CO_REVIEW_BIN" post` — submit the one GitHub review from current state
+  (`pr_verdict` plus postable findings). Marks those findings posted.
+- `"$CO_REVIEW_BIN" mark-posted <id> --url <comment-url>` — record a post if
+  you did not use `"$CO_REVIEW_BIN" post`.
 - `"$CO_REVIEW_BIN" set-status <reviewing|awaiting_review|posting|done>` —
   move the lifecycle along; the human's navigator shows this status.
-- `"$CO_REVIEW_BIN" recommend <approve|request_changes|reject>` — record
+- `"$CO_REVIEW_BIN" recommend <approve|request_changes|comment>` — record
   your overall opinion of the PR (`agent_pr_verdict`). Do this before
-  hand-off. The human still picks the final `pr_verdict`.
+  hand-off. The GitHub event is derived from validated findings; the human
+  confirms it.
 
 Keep it collaborative: the human sees everything you record in real time.
 "#;
@@ -222,14 +231,14 @@ mod tests {
     fn triage_done_msg_names_the_github_event() {
         let msg = triage_done_msg(
             crate::model::OverallVerdict::RequestChanges,
-            "f1 approved — bug",
+            "f1 validated — bug",
             None,
         );
         assert!(msg.starts_with(TRIAGE_DONE_PREFIX));
         assert!(msg.contains("Overall: request_changes"));
-        assert!(msg.contains("Findings: f1 approved — bug"));
+        assert!(msg.contains("Findings: f1 validated — bug"));
         assert!(msg.contains("REQUEST_CHANGES"));
-        assert!(msg.contains("gh pr review --request-changes"));
+        assert!(msg.contains("\"$CO_REVIEW_BIN\" post"));
         assert!(msg.contains("\"$CO_REVIEW_BIN\" set-status done"));
     }
 
@@ -261,6 +270,7 @@ mod tests {
             "add-finding",
             "set-status",
             "wait",
+            "post",
             "mark-posted",
             "import",
             "recommend",

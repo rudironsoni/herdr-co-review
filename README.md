@@ -15,10 +15,10 @@ side-by-side collaboration:
 - In the navigator you select a finding and immediately see **its related code**
   — the PR's own diff hunk around the referenced lines, syntax-highlighted, with
   the exact lines marked.
-- You triage each finding (approve / dismiss / discuss / edit / note) and can
-  **message the agent about the selected finding** straight into its pane.
+- You triage each finding (validate / dismiss / edit / note, toggle blocking)
+  and can **message the agent about the selected finding** straight into its pane.
 - The agent keeps driving everything that doesn't need you — most importantly,
-  **posting the approved findings to GitHub** when you're done.
+  **submitting one GitHub review** (inline comments + event) when you're done.
 
 It's the two of you reviewing together, instead of the agent throwing findings
 over the wall.
@@ -26,7 +26,7 @@ over the wall.
 ```
 ┌ co-review ─────────────────────────────────────────────────────────────┐
 │elKei24/herdr-co-review #7 — Fix pagination end index                    │
-│ reviewing   1 findings  1 pending  0 approved  0 dismissed  0 posted    │
+│ reviewing   1 findings  1 pending  0 validated  0 dismissed  0 posted    │
 └─────────────────────────────────────────────────────────────────────────┘
 ┌ findings (j/k) ─────────────────────────────────────────────────────────┐
 │▌● [pending ] Off-by-one in end index  paginate.rs:2                      │
@@ -45,7 +45,7 @@ over the wall.
 │    3       &items[..end]                                                │
 │    4   }                                                                 │
 └─────────────────────────────────────────────────────────────────────────┘
- j/k move  J/K scroll  a approve  d dismiss  x discuss  n note  c chat  …
+ j/k move  J/K scroll  v validate  d dismiss  b impact  n note  c chat  …
 ```
 
 ## How it works
@@ -158,11 +158,12 @@ co-review start 123 --dry-run           # offline preview of everything it will 
 | `j`/`k`, `↓`/`↑` | move between findings |
 | `g`/`G` | first / last |
 | `J`/`K`, `PgDn`/`PgUp` | scroll the detail & code |
-| `a` / `d` / `x` / `u` | approve / dismiss / needs-discussion / reset |
-| `e` | approve as edited |
+| `v` / `a` / `d` / `u` | validate / validate / dismiss / reset |
+| `b` | toggle blocking / non-blocking |
+| `e` | validate as edited |
 | `n` | add / edit your note (shown to the agent) |
 | `c` | message the agent about this finding (into its pane) |
-| `P` | ask the agent to post the approved findings |
+| `P` | after all findings: confirm or resend the derived GitHub review |
 | `r` | force refresh · `?` help · `q` quit |
 
 The mouse works too: click a finding to select it, click a pane to focus it (its
@@ -231,8 +232,8 @@ reference (for example `#123`) and `{protocol}` with the path to `CO_REVIEW.md`.
 You and I are co-reviewing pull request {pr} together, side by side.
 
 You are in the LEFT pane. In the RIGHT pane I have a navigator where I can see
-each of your findings with its surrounding code, mark it approved / dismissed /
-needs-discussion, and talk to you about it. We drive this review together.
+each of your findings with its surrounding code, mark it validated or dismissed,
+and talk to you about it. We drive this review together.
 
 First, the ground rule for every co-review command in this session:
 
@@ -254,7 +255,7 @@ Your job:
 
      "$CO_REVIEW_BIN" add-finding \
        --title "Off-by-one in page slicing" \
-       --severity high --category correctness \
+       --severity high --impact blocking --category correctness \
        --location src/paginate.rs:42-48 \
        --body "The end index is inclusive here but exclusive at the call site, so the last row is dropped when the page is full."
 
@@ -262,7 +263,7 @@ Your job:
    The finding shows up live in my navigator the moment you run the command.
 
 3. When you have added all findings, record your overall opinion of the PR
-   with `"$CO_REVIEW_BIN" recommend <approve|request_changes|reject>`, then
+   with `"$CO_REVIEW_BIN" recommend <approve|request_changes|comment>`, then
    run `"$CO_REVIEW_BIN" set-status awaiting_review`, tell me you're done, and
    END YOUR TURN — do not run a blocking command or poll. While I triage on
    the right, I may message you here about specific findings; respond
@@ -270,16 +271,16 @@ Your job:
    `"$CO_REVIEW_BIN" verdict <id> ...` or `"$CO_REVIEW_BIN" add-finding` /
    edit as needed.
 
-4. When I have decided every finding, my navigator asks me for an overall
-   result (approve, request_changes, or follow_up). It sends ONE message into
-   this pane only after that pick, with the overall result and every finding
-   verdict. Do not post or submit a GitHub review before that message. Then:
-   if overall is approve or request_changes (or reject), post the approved
-   findings as inline PR review comments (respect my notes; do NOT post
-   dismissed ones), run `"$CO_REVIEW_BIN" mark-posted <id> --url
-   <comment-url>` for each, submit `gh pr review` with the flag from the
-   message, and `"$CO_REVIEW_BIN" set-status done`. If overall is follow_up,
-   do the extra task in the message instead of submitting a GitHub review.
+4. When I have decided every finding, my navigator derives the GitHub review
+   event from validated findings (blocking → request_changes, only
+   non-blocking → comment, none → approve) and asks me to confirm. It sends
+   ONE message into this pane only after that confirm, with the overall
+   result and every finding verdict. Do not post before that message. Then:
+   if overall is approve, comment, or request_changes, run
+   `"$CO_REVIEW_BIN" post` (one GitHub review: inline comments for findings
+   with a location, the rest in the review body; dismissed findings are
+   omitted), then `"$CO_REVIEW_BIN" set-status done`. If overall is
+   follow_up, do the extra task in the message instead of posting.
 
 The full contract, including how to read my decisions back, is in {protocol}
 (also available via `"$CO_REVIEW_BIN" protocol`). Read it if anything is unclear.
@@ -313,7 +314,7 @@ You can also post directly (a fallback for agent-agnostic use), given a GitHub
 token in `$GH_TOKEN`/`$GITHUB_TOKEN` or `gh auth login`:
 
 ```sh
-co-review post            # posts approved/edited findings as inline PR comments
+co-review post            # one GitHub review (event + inline comments + body)
 co-review post --dry-run  # show what would be posted
 ```
 

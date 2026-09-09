@@ -150,6 +150,8 @@ fn full_agent_flow() {
             "Check line 2",
             "--severity",
             "high",
+            "--impact",
+            "blocking",
             "--location",
             "f.txt:2",
             "--body",
@@ -166,6 +168,7 @@ fn full_agent_flow() {
     assert_eq!(v["findings"].as_array().unwrap().len(), 1);
     assert_eq!(v["findings"][0]["verdict"], "pending");
     assert_eq!(v["findings"][0]["severity"], "high");
+    assert_eq!(v["findings"][0]["impact"], "blocking");
 
     // edit revises only the passed fields
     let (_o, err, ok) = co_review(
@@ -214,7 +217,12 @@ fn full_agent_flow() {
     );
 
     // deciding the last finding tells the agent triage is done
-    let (out, err, ok) = co_review(&home, Some(&session), &work, &["verdict", "f1", "approved"]);
+    let (out, err, ok) = co_review(
+        &home,
+        Some(&session),
+        &work,
+        &["verdict", "f1", "validated"],
+    );
     assert!(ok, "verdict failed: {err}");
     assert!(
         out.contains("all findings decided"),
@@ -238,10 +246,15 @@ fn full_agent_flow() {
     let (_o, err, ok) = co_review(&home, Some(&session), &work, &["wait", "--timeout", "3000"]);
     assert!(ok, "wait did not return: {err}");
 
-    // post --dry-run lists the approved finding without needing a token
+    // post --dry-run prints one review payload (event + inline comment)
     let (out, err, ok) = co_review(&home, Some(&session), &work, &["post", "--dry-run"]);
     assert!(ok, "post --dry-run failed: {err}");
-    assert!(out.contains("would post 1 finding"), "unexpected: {out}");
+    assert!(out.contains("event: REQUEST_CHANGES"), "unexpected: {out}");
+    assert!(out.contains("inline: 1 comment"), "unexpected: {out}");
+    assert!(
+        out.contains("f.txt:2") || out.contains("f.txt 2"),
+        "unexpected: {out}"
+    );
     assert!(out.contains("Off-by-one on line 2")); // the edited title
 
     // sessions lists the live session
@@ -337,7 +350,12 @@ fn edit_resets_decided_verdict_and_clears_fields() {
             "style",
         ],
     );
-    co_review(&home, Some(&session), &work, &["verdict", "f1", "approved"]);
+    co_review(
+        &home,
+        Some(&session),
+        &work,
+        &["verdict", "f1", "validated"],
+    );
 
     // editing a decided finding resets its verdict and can clear fields
     let (out, err, ok) = co_review(

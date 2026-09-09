@@ -89,12 +89,16 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Gray),
         ),
         Span::styled(
-            format!("  {} approved", c.approved),
+            format!("  {} validated", c.validated),
             Style::default().fg(Color::Green),
         ),
         Span::styled(
             format!("  {} dismissed", c.dismissed),
             Style::default().fg(Color::Red),
+        ),
+        Span::styled(
+            format!("  {} blocking", c.blocking_validated),
+            Style::default().fg(Color::Magenta),
         ),
         Span::styled(
             format!("  {} posted", c.posted),
@@ -197,6 +201,15 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) -> u16 {
             Span::raw("  "),
             verdict_badge(fd.verdict),
             Span::raw("  "),
+            Span::styled(
+                fd.impact.label().to_string(),
+                Style::default().fg(if fd.impact == crate::model::Impact::Blocking {
+                    Color::Magenta
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::raw("  "),
             Span::styled(fd.id.clone(), Style::default().fg(Color::DarkGray)),
         ]));
         lines.push(Line::from(Span::styled(
@@ -293,7 +306,7 @@ fn focus_style(app: &App, pane: Pane) -> Style {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let hint = "j/k move  J/K scroll  a approve  d dismiss  x discuss  u reset  n note  c chat  P post  r refresh  ? help  q quit";
+    let hint = "j/k move  J/K scroll  v validate  d dismiss  b impact  u reset  n note  c chat  P overall  r refresh  ? help  q quit";
     let content = match app.status_line() {
         Some(msg) => Line::from(Span::styled(
             format!(" {msg}"),
@@ -343,9 +356,8 @@ fn draw_help(f: &mut Frame, size: Rect) {
         Line::from("  shift + drag      select text (the TUI grabs the mouse)"),
         Line::from(""),
         Line::from("Triage (acts on the selected finding)"),
-        Line::from("  a  approve        d  dismiss"),
-        Line::from("  x  needs-discussion   u  reset to pending"),
-        Line::from("  e  approve as edited"),
+        Line::from("  v / a  validate     d  dismiss     b  toggle blocking"),
+        Line::from("  u  reset to pending     e  validate as edited"),
         Line::from("  n  add / edit your note"),
         Line::from(""),
         Line::from("Collaboration"),
@@ -381,26 +393,34 @@ fn draw_pr_verdict(f: &mut Frame, app: &App, size: Rect) {
         Some(v) => format!("Agent recommends: {}", v.label()),
         None => "Agent has not recorded an overall opinion yet.".to_string(),
     };
+    let derived = app.state.derived_overall();
+    let c = app.state.counts();
+    let derived_line = format!(
+        "Derived: {}  ({} validated, {} blocking)",
+        derived.label(),
+        c.validated,
+        c.blocking_validated
+    );
     let lines = vec![
         Line::from(Span::styled(
-            "overall PR verdict",
+            "submit GitHub review",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(agent_line),
-        Line::from("Every finding is decided. This pick is for the PR, not a finding."),
-        Line::from("The agent is told only after you pick."),
+        Line::from(derived_line),
+        Line::from("One review: inline comments for findings with a line, rest in the body."),
+        Line::from("The event is derived. Enter sends it. This is not a finding key."),
         Line::from(""),
-        Line::from("  a  approve            gh pr review --approve"),
-        Line::from("  r  request changes    gh pr review --request-changes"),
-        Line::from("  x  ask the agent to do something else"),
+        Line::from("  Enter  submit the derived review"),
+        Line::from("  x      another loop (no GitHub review)"),
         Line::from(""),
         Line::from(Span::styled(
             "Esc  pick later with P",
             Style::default().fg(Color::DarkGray),
         )),
     ];
-    let block = Block::default().borders(Borders::ALL).title(" PR verdict ");
+    let block = Block::default().borders(Borders::ALL).title(" PR review ");
     f.render_widget(
         Paragraph::new(lines)
             .block(block)
@@ -432,9 +452,8 @@ fn severity_color(s: Severity) -> Color {
 fn verdict_badge(v: Verdict) -> Span<'static> {
     let (text, color) = match v {
         Verdict::Pending => ("pending ", Color::DarkGray),
-        Verdict::Approved => ("approved", Color::Green),
+        Verdict::Validated => ("validated", Color::Green),
         Verdict::Dismissed => ("dismissed", Color::Red),
-        Verdict::NeedsDiscussion => ("discuss ", Color::Yellow),
         Verdict::Edited => ("edited  ", Color::Cyan),
     };
     Span::styled(format!("[{text}]"), Style::default().fg(color))

@@ -6,7 +6,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::cli::*;
 use crate::diffview;
 use crate::git::Git;
-use crate::model::{Finding, Location, ReviewStatus, Severity, State, Verdict};
+use crate::model::{
+    Finding, Impact, Location, OverallVerdict, ReviewStatus, Severity, State, Verdict,
+};
 use crate::store::Store;
 
 /// Resolve the [`Store`] a command should act on.
@@ -28,6 +30,8 @@ pub fn add_finding(args: &AddFindingArgs) -> Result<()> {
 
     let severity = Severity::parse(&args.severity)
         .ok_or_else(|| anyhow!("unknown severity '{}'", args.severity))?;
+    let impact =
+        Impact::parse(&args.impact).ok_or_else(|| anyhow!("unknown impact '{}'", args.impact))?;
 
     let locations = args
         .locations
@@ -41,6 +45,7 @@ pub fn add_finding(args: &AddFindingArgs) -> Result<()> {
         let id = state.mint_finding_id();
         let mut f = Finding::new(id.clone(), args.title.clone());
         f.severity = severity;
+        f.impact = impact;
         f.category = args.category.clone();
         f.body = body.clone();
         f.suggestion = args.suggestion.clone();
@@ -88,6 +93,8 @@ struct IncomingFinding {
     #[serde(default)]
     severity: Option<String>,
     #[serde(default)]
+    impact: Option<String>,
+    #[serde(default)]
     category: Option<String>,
     #[serde(default)]
     body: String,
@@ -110,6 +117,17 @@ impl IncomingFinding {
                 Severity::default()
             }),
             None => Severity::default(),
+        };
+        f.impact = match self.impact.as_deref() {
+            Some(s) => Impact::parse(s).unwrap_or_else(|| {
+                eprintln!(
+                    "warning: unknown impact '{s}' on \"{}\"; defaulting to {}",
+                    self.title,
+                    Impact::default().label()
+                );
+                Impact::default()
+            }),
+            None => Impact::default(),
         };
         f.category = self.category.clone();
         f.body = self.body.clone();
@@ -313,8 +331,8 @@ pub fn status(args: &SessionArgs) -> Result<()> {
     print_header(&state);
     let c = state.counts();
     println!(
-        "  approved/edited: {}   dismissed: {}   posted: {}",
-        c.approved, c.dismissed, c.posted
+        "  validated/edited: {}   dismissed: {}   blocking: {}   posted: {}",
+        c.validated, c.dismissed, c.blocking_validated, c.posted
     );
     println!("  worktree: {}", state.session.worktree);
     println!("  session:  {}", store.session_dir().display());
@@ -410,92 +428,116 @@ pub fn wait(args: &WaitArgs) -> Result<()> {
 pub fn post(args: &PostArgs) -> Result<()> {
     let store = open_store(&args.session)?;
     let state = store.read()?;
-    let postable: Vec<Finding> = state.postable().cloned().collect();
-    if postable.is_empty() {
-        eprintln!("nothing to post (no approved/edited, un-posted findings)");
-        return Ok(());
+    let verdict = state.pr_verdict.unwrap_or_else(|| state.derived_overall());
+    if verdict == OverallVerdict::FollowUp {
+        bail!("overall is follow_up — do not submit a GitHub review");
     }
+    let Some(event) = verdict.gh_event() else {
+        bail!("overall {} has no GitHub review event", verdict.label());
+    };
+
+    let postable: Vec<Finding> = state.postable().cloned().collect();
+    let mut inline: Vec<crate::github::ReviewComment> = Vec::new();
+    let mut body_findings: Vec<&Finding> = Vec::new();
+    for f in &postable {
+        match f.primary_location() {
+            Some(loc) => inline.push(crate::github::ReviewComment {
+                body: render_comment_body(f, true),
+                path: loc.file.clone(),
+                line: loc.end(),
+                start_line: Some(loc.start_line),
+                side: loc.side,
+            }),
+            None => body_findings.push(f),
+        }
+    }
+    let body = render_review_body(&state, &body_findings, false);
 
     if args.dry_run {
-        println!("would post {} finding(s):", postable.len());
-        for f in &postable {
-            println!(
-                "  {} [{}] {} ({})",
-                f.id,
-                f.severity.label(),
-                f.title,
-                f.primary_location()
-                    .map(|l| l.label())
-                    .unwrap_or_else(|| "no location".into())
-            );
+        println!("event: {event}");
+        println!("inline: {} comment(s)", inline.len());
+        for (f, c) in postable
+            .iter()
+            .filter(|f| f.primary_location().is_some())
+            .zip(&inline)
+        {
+            println!("  {} {} {}:{}", f.id, f.impact.label(), c.path, c.line);
+        }
+        println!("body:");
+        if body.is_empty() {
+            println!("  (empty)");
+        } else {
+            println!("{body}");
         }
         return Ok(());
     }
 
     let client = crate::github::Client::from_env()?;
-    let mut posted = 0;
-    for f in &postable {
-        let Some(loc) = f.primary_location() else {
-            eprintln!("skip {}: no location to attach a comment to", f.id);
-            continue;
-        };
-        let comment = crate::github::ReviewComment {
-            body: render_comment_body(f, true),
-            path: loc.file.clone(),
-            line: loc.end(),
-            start_line: Some(loc.start_line),
-            side: loc.side,
-        };
-        // Fall back to a general PR comment when GitHub rejects the *line* (422 —
-        // the line isn't part of the diff). Other failures (transient/auth) skip
-        // just this finding and continue, so one blip doesn't abandon the rest of
-        // the batch; the finding stays un-posted and a re-run of `post` retries it.
-        let url = match client.post_review_comment(&state.pr, &comment) {
-            Ok(url) => url,
-            Err(e) if line_not_in_diff(&e) => {
-                eprintln!("{}: line not in the diff; posting as a PR comment", f.id);
-                // A ```suggestion block is only applyable inline, so render the
-                // conversation comment with a plain code block instead.
-                let body = format!(
-                    "{}\n\n_re `{}`_",
-                    render_comment_body(f, false),
-                    loc.label()
-                );
-                match client.post_issue_comment(&state.pr, &body) {
-                    Ok(url) => url,
-                    Err(e2) => {
-                        eprintln!("{}: PR comment also failed ({e2:#}); skipping", f.id);
-                        continue;
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "{}: post failed ({e:#}); skipping — re-run `post` to retry",
-                    f.id
-                );
-                continue;
-            }
-        };
-        store.update(|st| {
-            if let Some(ff) = st.finding_mut(&f.id) {
+    let mut review = crate::github::PullRequestReview {
+        event,
+        body: body.clone(),
+        comments: inline,
+    };
+    let url = match client.submit_review(&state.pr, &review) {
+        Ok(url) => url,
+        Err(e) if line_not_in_diff(&e) && !review.comments.is_empty() => {
+            eprintln!("GitHub rejected a line; folding inline comments into the review body");
+            let mut folded: Vec<&Finding> = body_findings.clone();
+            folded.extend(postable.iter().filter(|f| f.primary_location().is_some()));
+            review.body = render_review_body(&state, &folded, true);
+            review.comments.clear();
+            client.submit_review(&state.pr, &review)?
+        }
+        Err(e) => return Err(e),
+    };
+
+    let ids: Vec<String> = postable.iter().map(|f| f.id.clone()).collect();
+    store.update(|st| {
+        for id in &ids {
+            if let Some(ff) = st.finding_mut(id) {
                 ff.posted = true;
                 ff.posted_url = Some(url.clone());
                 ff.touch();
             }
-            Ok(())
-        })?;
-        println!("{} -> {url}", f.id);
-        posted += 1;
-    }
-    store.update(|st| {
+        }
         if st.postable().next().is_none() {
             st.status = ReviewStatus::Done;
         }
         Ok(())
     })?;
-    eprintln!("posted {posted} finding(s)");
+    println!("review -> {url}");
+    eprintln!(
+        "submitted {} ({}) with {} inline comment(s)",
+        verdict.label(),
+        event,
+        postable
+            .iter()
+            .filter(|f| f.primary_location().is_some())
+            .count()
+    );
     Ok(())
+}
+
+fn render_review_body(state: &State, body_findings: &[&Finding], folded_inlines: bool) -> String {
+    let mut parts = Vec::new();
+    let blocking: Vec<&str> = state
+        .postable()
+        .filter(|f| f.impact == Impact::Blocking)
+        .map(|f| f.title.as_str())
+        .collect();
+    if !blocking.is_empty() {
+        parts.push(format!("Blocking: {}.", blocking.join("; ")));
+    }
+    for f in body_findings {
+        let mut block = render_comment_body(f, false);
+        if folded_inlines {
+            if let Some(loc) = f.primary_location() {
+                block.push_str(&format!("\n\n_re `{}`_", loc.label()));
+            }
+        }
+        parts.push(block);
+    }
+    parts.join("\n\n")
 }
 
 /// Whether a post error is GitHub's "line isn't part of the diff" rejection.
@@ -525,10 +567,8 @@ fn render_comment_body(f: &Finding, applyable_suggestion: bool) -> String {
         out.push_str(s.trim_end_matches('\n'));
         out.push_str("\n```\n");
     }
-    if f.verdict == Verdict::Edited {
-        if let Some(note) = &f.user_note {
-            out.push_str(&format!("\n> {note}\n"));
-        }
+    if let Some(note) = &f.user_note {
+        out.push_str(&format!("\n> {note}\n"));
     }
     out
 }
@@ -569,8 +609,8 @@ pub fn sessions(args: &SessionsArgs) -> Result<()> {
                     "number": s.pr.number,
                     "status": s.status.label(),
                     "counts": {
-                        "total": c.total, "pending": c.pending, "approved": c.approved,
-                        "dismissed": c.dismissed, "needs_discussion": c.needs_discussion,
+                        "total": c.total, "pending": c.pending, "validated": c.validated,
+                        "dismissed": c.dismissed, "blocking_validated": c.blocking_validated,
                         "posted": c.posted,
                     },
                     "session_dir": dir.display().to_string(),
@@ -589,14 +629,15 @@ pub fn sessions(args: &SessionsArgs) -> Result<()> {
     for (dir, s) in &sessions {
         let c = s.counts();
         println!(
-            "{}/{} #{}  [{}]  {} finding(s) — {} pending, {} approved, {} posted",
+            "{}/{} #{}  [{}]  {} finding(s) — {} pending, {} validated, {} blocking, {} posted",
             s.pr.owner,
             s.pr.repo,
             s.pr.number,
             s.status.label(),
             c.total,
             c.pending,
-            c.approved,
+            c.validated,
+            c.blocking_validated,
             c.posted
         );
         println!("    {}", dir.display());
