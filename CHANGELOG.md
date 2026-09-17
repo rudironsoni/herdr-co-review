@@ -1,3 +1,10 @@
+# [2.2.0](https://github.com/rudironsoni/herdr-co-review/compare/v2.1.0...v2.2.0) (2026-09-17)
+
+
+### Features
+
+* disable github pr link intercept ([#3](https://github.com/rudironsoni/herdr-co-review/issues/3)) ([5872105](https://github.com/rudironsoni/herdr-co-review/commit/58721050cb55f6f475cee02ee592d8b62b033679))
+
 # [2.1.0](https://github.com/rudironsoni/herdr-co-review/compare/v2.0.0...v2.1.0) (2026-09-09)
 
 
