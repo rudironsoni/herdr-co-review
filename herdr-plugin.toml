@@ -1,9 +1,9 @@
 # Herdr plugin manifest for co-review.
 #
-# Installing this as a Herdr plugin gives you a "Co-review this PR" action and a
-# GitHub-PR link handler: Ctrl+click a pull-request URL in any pane and co-review
-# lays out the split-screen for it. The canonical entry point is still the shell
-# command `co-review start <pr>`, run from inside your repo checkout.
+# Installing this as a Herdr plugin gives you a "Co-review this PR" action.
+# GitHub PR URL intercept is off by default (see the commented
+# [[link_handlers]] block below). The canonical entry point is still
+# `co-review start <pr>`, run from inside your repo checkout.
 
 id = "rudironsoni.co-review"
 name = "co-review"
@@ -19,8 +19,8 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["bash", "scripts/install-binary.sh"]
 
-# Invoked by the link handler; `start` reads the clicked PR URL and the pane's
-# cwd from $HERDR_PLUGIN_CONTEXT_JSON. The wrapper restores a usable PATH
+# `start` reads the pane cwd (and a clicked PR URL, if a link handler is on)
+# from $HERDR_PLUGIN_CONTEXT_JSON. The wrapper restores a usable PATH
 # (herdr runs plugin commands with a minimal one) and resolves the binary
 # under $HERDR_PLUGIN_ROOT.
 [[actions]]
@@ -29,9 +29,10 @@ title = "Co-review this pull request"
 contexts = ["workspace", "pane"]
 command = ["bash", "scripts/run-action.sh", "start"]
 
-# Ctrl+click a GitHub PR URL anywhere to start a co-review for it.
-[[link_handlers]]
-id = "github-pr"
-title = "Co-review this PR"
-pattern = "^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+"
-action = "start-from-url"
+# Off by default. Uncomment this table and reinstall or relink the plugin
+# to intercept Ctrl+click on GitHub PR URLs.
+# [[link_handlers]]
+# id = "github-pr"
+# title = "Co-review this PR"
+# pattern = "^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+"
+# action = "start-from-url"
