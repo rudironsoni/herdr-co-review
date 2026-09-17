@@ -1,3 +1,10 @@
+# [2.3.0](https://github.com/rudironsoni/herdr-co-review/compare/v2.2.0...v2.3.0) (2026-09-17)
+
+
+### Features
+
+* add clickable navigator actions ([#4](https://github.com/rudironsoni/herdr-co-review/issues/4)) ([c28d848](https://github.com/rudironsoni/herdr-co-review/commit/c28d84877a15654663fcdaf739d40206c8898b39))
+
 # [2.2.0](https://github.com/rudironsoni/herdr-co-review/compare/v2.1.0...v2.2.0) (2026-09-17)
 
 
