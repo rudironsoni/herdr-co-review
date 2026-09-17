@@ -572,3 +572,16 @@ any blocking → `REQUEST_CHANGES`; only non-blocking → `COMMENT`; none →
 located findings become `comments[]`; the rest go in `body`. Do not post
 per-line comments and then `gh pr review`. A 422 on a line folds those
 inlines into the body and retries once. Navigator still does not call GitHub.
+
+## 29. GitHub PR link intercept is opt-in (2026-09-17)
+
+§2 shipped a `[[link_handlers]]` entry so Ctrl+click on a GitHub PR URL
+started co-review. That steal happens in Herdr before `co-review` runs.
+Herdr 0.9.1 has no per-handler enable flag (`id`, `title`, `pattern`,
+`action`, `platforms` only), and a `config.toml` key can only no-op
+*after* the click is already taken.
+
+The shipped manifest therefore has no live `[[link_handlers]]` table. The
+block stays commented in `herdr-plugin.toml`. Uncomment and reinstall or
+relink to restore intercept. The "Co-review this pull request" action and
+`co-review start <pr>` are unchanged.

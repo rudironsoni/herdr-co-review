@@ -118,9 +118,10 @@ prebuilt binary** for your platform — so installing the plugin needs no Rust
 toolchain. The prebuilt asset is only trusted when the checkout *is*
 `elKei24/herdr-co-review`; a fork or local checkout is always built from its
 own source with `cargo build --release` (which needs a Rust toolchain).
-You get a "Co-review this pull request" action and a GitHub-PR link handler
-(Ctrl+click a PR URL to start a review). Manifest:
-[`herdr-plugin.toml`](./herdr-plugin.toml).
+You get a "Co-review this pull request" action. Ctrl+click on a GitHub PR URL
+does **not** start a review (Herdr opens the URL as usual). To intercept those
+clicks, uncomment `[[link_handlers]]` in
+[`herdr-plugin.toml`](./herdr-plugin.toml) and reinstall or relink the plugin.
 
 Installing the plugin is enough to use the CLI too: it symlinks the binary into
 the same directory the installer above would pick, so `co-review start …` works
