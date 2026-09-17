@@ -9,7 +9,21 @@ use ratatui::Frame;
 
 use crate::herdr::AgentState;
 use crate::model::{Severity, Verdict};
-use crate::tui::app::{App, Input, Pane};
+use crate::tui::app::{Action, App, Hit, Input, Pane};
+
+const FOOTER_CHIPS: &[(&str, Action)] = &[
+    ("[v]alidate", Action::Validate),
+    ("[d]ismiss", Action::Dismiss),
+    ("[b]lock", Action::ToggleImpact),
+    ("[u]ndo", Action::Reset),
+    ("[e]dit", Action::Edited),
+    ("[n]ote", Action::Note),
+    ("[c]hat", Action::Chat),
+    ("[P]ost", Action::Overall),
+    ("[r]efresh", Action::Refresh),
+    ("[?]", Action::Help),
+    ("[q]", Action::Quit),
+];
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
@@ -39,21 +53,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let list_offset = draw_list(f, app, chunks[1]);
     let detail_max_scroll = draw_detail(f, app, chunks[2]);
     app.record_layout(chunks[1], chunks[2], list_offset, detail_max_scroll);
+
+    let mut hits = vec![(chunks[1], Hit::Findings), (chunks[2], Hit::Detail)];
     match input {
         Some((para, lines)) => {
             // Past the height cap, keep the tail (with the cursor) in view.
             let scroll = lines.saturating_sub(chunks[3].height);
             f.render_widget(para.scroll((scroll, 0)), chunks[3]);
+            hits.push((size, Hit::CancelInput));
+            hits.push((chunks[3], Hit::Ignore));
         }
-        None => draw_footer(f, app, chunks[3]),
+        None => draw_footer(f, app, chunks[3], &mut hits),
     }
 
     if app.show_help {
         draw_help(f, size);
+        hits.push((size, Hit::DismissOverlay));
     }
     if app.asking_pr_verdict {
-        draw_pr_verdict(f, app, size);
+        draw_pr_verdict(f, app, size, &mut hits);
     }
+    app.record_hits(hits);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -305,16 +325,40 @@ fn focus_style(app: &App, pane: Pane) -> Style {
     }
 }
 
-fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let hint = "j/k move  J/K scroll  v validate  d dismiss  b impact  u reset  n note  c chat  P overall  r refresh  ? help  q quit";
-    let content = match app.status_line() {
-        Some(msg) => Line::from(Span::styled(
-            format!(" {msg}"),
-            Style::default().fg(Color::Black).bg(Color::Yellow),
-        )),
-        None => Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))),
-    };
-    f.render_widget(Paragraph::new(content), area);
+fn draw_footer(f: &mut Frame, app: &App, area: Rect, hits: &mut Vec<(Rect, Hit)>) {
+    if let Some(msg) = app.status_line() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            ))),
+            area,
+        );
+        return;
+    }
+
+    let mut x = area.x;
+    let y = area.y;
+    let max_x = area.right();
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, (label, action)) in FOOTER_CHIPS.iter().enumerate() {
+        let width = label.len() as u16;
+        let gap = u16::from(i > 0);
+        if x.saturating_add(gap).saturating_add(width) > max_x {
+            break;
+        }
+        if gap == 1 {
+            spans.push(Span::raw(" "));
+            x = x.saturating_add(1);
+        }
+        hits.push((
+            Rect::new(x, y, width, area.height.max(1)),
+            Hit::Action(*action),
+        ));
+        spans.push(Span::styled(*label, Style::default().fg(Color::Gray)));
+        x = x.saturating_add(width);
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn input_paragraph(app: &App) -> Paragraph<'static> {
@@ -352,8 +396,15 @@ fn draw_help(f: &mut Frame, size: Rect) {
         Line::from(""),
         Line::from("Mouse"),
         Line::from("  click             select a finding · focus a pane (lit border)"),
+        Line::from("  click footer      same actions as the keys in each chip"),
+        Line::from("  click overlay     buttons run; outside dismisses; help closes"),
         Line::from("  wheel             scrolls the pane under the cursor"),
         Line::from("  shift + drag      select text (the TUI grabs the mouse)"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "click anywhere to close this help",
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(""),
         Line::from("Triage (acts on the selected finding)"),
         Line::from("  v / a  validate     d  dismiss     b  toggle blocking"),
@@ -386,9 +437,16 @@ fn draw_help(f: &mut Frame, size: Rect) {
     );
 }
 
-fn draw_pr_verdict(f: &mut Frame, app: &App, size: Rect) {
+fn draw_pr_verdict(f: &mut Frame, app: &App, size: Rect, hits: &mut Vec<(Rect, Hit)>) {
     let area = centered_rect(64, 50, size);
     f.render_widget(Clear, area);
+    let block = Block::default().borders(Borders::ALL).title(" PR review ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    hits.push((size, Hit::DismissOverlay));
+    hits.push((area, Hit::Ignore));
+
     let agent_line = match app.state.agent_pr_verdict {
         Some(v) => format!("Agent recommends: {}", v.label()),
         None => "Agent has not recorded an overall opinion yet.".to_string(),
@@ -411,23 +469,53 @@ fn draw_pr_verdict(f: &mut Frame, app: &App, size: Rect) {
         Line::from(derived_line),
         Line::from("One review: inline comments for findings with a line, rest in the body."),
         Line::from("The event is derived. Enter sends it. This is not a finding key."),
-        Line::from(""),
-        Line::from("  Enter  submit the derived review"),
-        Line::from("  x      another loop (no GitHub review)"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Esc  pick later with P",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::from("Click a button, or click outside to pick later with P."),
     ];
-    let block = Block::default().borders(Borders::ALL).title(" PR review ");
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
     f.render_widget(
         Paragraph::new(lines)
-            .block(block)
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: false }),
-        area,
+        chunks[0],
     );
+
+    let buttons = [
+        (
+            chunks[1],
+            "[Enter] submit the derived review",
+            Action::SubmitPrVerdict,
+        ),
+        (
+            chunks[2],
+            "[x] another loop (no GitHub review)",
+            Action::FollowUp,
+        ),
+        (
+            chunks[3],
+            "[Esc] pick later with P",
+            Action::CancelPrVerdict,
+        ),
+    ];
+    for (rect, label, action) in buttons {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                label,
+                Style::default().fg(Color::Cyan),
+            ))),
+            rect,
+        );
+        hits.push((rect, Hit::Action(action)));
+    }
 }
 
 fn agent_state_color(state: AgentState) -> Color {

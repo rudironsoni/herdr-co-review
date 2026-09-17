@@ -168,9 +168,10 @@ co-review start 123 --dry-run           # offline preview of everything it will 
 | `r` | force refresh · `?` help · `q` quit |
 
 The mouse works too: click a finding to select it, click a pane to focus it (its
-border lights up), and the wheel scrolls the pane under the cursor — the
-findings list or the detail & code. Because the navigator captures the mouse,
-use `Shift`+drag to select text with your terminal.
+border lights up), click a footer chip to run that action, click overlay
+buttons (or outside an overlay to dismiss it), and the wheel scrolls the pane
+under the cursor. Because the navigator captures the mouse, use `Shift`+drag to
+select text with your terminal.
 
 Findings appear live as the agent records them; your verdicts and notes are
 visible to the agent immediately.
