@@ -35,6 +35,39 @@ pub enum Pane {
     Detail,
 }
 
+/// A mouse target recorded by the last paint. Last matching rect wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hit {
+    Findings,
+    Detail,
+    Action(Action),
+    /// Click outside (or on) the help overlay, or outside the PR-verdict overlay.
+    DismissOverlay,
+    /// Click outside the input box while a note/chat/follow-up is open.
+    CancelInput,
+    /// Consume the click (the input box itself).
+    Ignore,
+}
+
+/// One human action. Keys and footer/overlay clicks both call `App::run_action`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Validate,
+    Dismiss,
+    ToggleImpact,
+    Reset,
+    Edited,
+    Note,
+    Chat,
+    Overall,
+    Refresh,
+    Help,
+    Quit,
+    SubmitPrVerdict,
+    FollowUp,
+    CancelPrVerdict,
+}
+
 /// A rendered related-code block for one finding location.
 pub struct CodeBlock {
     pub header: String,
@@ -60,6 +93,8 @@ pub struct App {
     pub detail_area: Rect,
     pub list_offset: usize,
     detail_max_scroll: u16,
+    /// Click targets from the last paint, back to front (last match wins).
+    hits: Vec<(Rect, Hit)>,
 
     pub input: Option<Input>,
     pub input_buffer: String,
@@ -102,6 +137,7 @@ impl App {
             detail_area: Rect::default(),
             list_offset: 0,
             detail_max_scroll: 0,
+            hits: Vec::new(),
             input: None,
             input_buffer: String::new(),
             asking_pr_verdict: false,
@@ -300,7 +336,33 @@ impl App {
         self.detail_scroll = self.detail_scroll.min(detail_max_scroll);
     }
 
-    /// The pane containing a terminal cell, if any.
+    /// Replace the click map with what this frame painted.
+    pub fn record_hits(&mut self, hits: Vec<(Rect, Hit)>) {
+        self.hits = hits;
+    }
+
+    /// The topmost hit at a terminal cell, if any.
+    pub fn hit_at(&self, col: u16, row: u16) -> Option<Hit> {
+        let pos = (col, row).into();
+        self.hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(pos))
+            .map(|(_, hit)| *hit)
+    }
+
+    /// The last-painted rect for a hit, if any. Tests use this to click a chip.
+    #[cfg(test)]
+    pub fn hit_rect(&self, wanted: Hit) -> Option<Rect> {
+        self.hits
+            .iter()
+            .rev()
+            .find(|(_, hit)| *hit == wanted)
+            .map(|(rect, _)| *rect)
+    }
+
+    /// The pane containing a terminal cell, if any. Ignores overlays; those are
+    /// `hit_at` targets.
     pub fn pane_at(&self, col: u16, row: u16) -> Option<Pane> {
         if self.list_area.contains((col, row).into()) {
             Some(Pane::Findings)
@@ -314,6 +376,37 @@ impl App {
     pub fn focus_pane(&mut self, pane: Pane) {
         if self.focus != pane {
             self.focus = pane;
+            self.dirty = true;
+        }
+    }
+
+    /// Run a triage/nav action. Keys and mouse chips share this path.
+    pub fn run_action(&mut self, action: Action) {
+        match action {
+            Action::Validate => self.set_verdict(Verdict::Validated),
+            Action::Dismiss => self.set_verdict(Verdict::Dismissed),
+            Action::ToggleImpact => self.toggle_impact(),
+            Action::Reset => self.set_verdict(Verdict::Pending),
+            Action::Edited => self.set_verdict(Verdict::Edited),
+            Action::Note => self.begin_input(Input::Note),
+            Action::Chat => self.begin_input(Input::Chat),
+            Action::Overall => self.nudge_post(),
+            Action::Refresh => self.force_reload(),
+            Action::Help => self.show_help = !self.show_help,
+            Action::Quit => self.should_quit = true,
+            Action::SubmitPrVerdict => self.submit_derived_pr_verdict(),
+            Action::FollowUp => self.begin_follow_up(),
+            Action::CancelPrVerdict => self.cancel_pr_verdict_prompt(),
+        }
+        self.dirty = true;
+    }
+
+    /// Close the top overlay (PR verdict first, then help).
+    pub fn dismiss_overlay(&mut self) {
+        if self.asking_pr_verdict {
+            self.cancel_pr_verdict_prompt();
+        } else if self.show_help {
+            self.show_help = false;
             self.dirty = true;
         }
     }

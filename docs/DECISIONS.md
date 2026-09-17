@@ -329,6 +329,13 @@ Hit-testing needs the geometry that was actually painted, so `ui::draw` takes
 the detail's maximum scroll. That also gave the detail scroll a real upper bound
 (`J` used to increment forever, and the clamp only happened at render time).
 
+*(2026-09-17 addendum: ratatui 0.30 widgets still do not handle the mouse.
+`List` / `Paragraph` / `Scrollbar` have no click API. First-class mouse here
+means the navigator owns a hit map painted by `ui::draw`: footer chips, overlay
+buttons, click-outside to dismiss. Clicks call the same `App::run_action` path
+as the keys. Hover and scrollbar-thumb drag stay out: `Moved` would repaint on
+every cell, and the built-in scrollbar is paint-only.)*
+
 ## 17. Installing the plugin puts `co-review` on the user's PATH
 
 *(2026-09-04 addendum: since §15's rework this symlink is convenience only — it

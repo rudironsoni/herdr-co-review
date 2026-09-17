@@ -24,9 +24,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::cli::ViewArgs;
-use crate::model::Verdict;
 use crate::store::Store;
-use app::{App, Input, Pane};
+use app::{Action, App, Hit, Pane};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -119,29 +118,43 @@ fn handle_event(app: &mut App, ev: Event) {
 }
 
 /// Clicking a pane focuses it (and, in the list, selects the finding under the
-/// cursor); the wheel scrolls whichever pane is focused, after a wheel event
-/// over a pane focuses it too.
+/// cursor). Footer chips and overlay buttons run the same actions as the keys.
+/// The wheel scrolls whichever pane is focused, after a wheel event over a pane
+/// focuses it too.
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
-    if app.show_help || app.input.is_some() || app.asking_pr_verdict {
-        return;
-    }
-    let pane = app.pane_at(mouse.column, mouse.row);
     match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            let Some(pane) = pane else { return };
-            app.focus_pane(pane);
-            if pane == Pane::Findings {
+        MouseEventKind::Down(MouseButton::Left) => match app.hit_at(mouse.column, mouse.row) {
+            Some(Hit::Findings) => {
+                app.focus_pane(Pane::Findings);
                 app.select_at_row(mouse.row);
+                app.dirty = true;
             }
-        }
+            Some(Hit::Detail) => {
+                app.focus_pane(Pane::Detail);
+                app.dirty = true;
+            }
+            Some(Hit::Action(action)) => app.run_action(action),
+            Some(Hit::DismissOverlay) => app.dismiss_overlay(),
+            Some(Hit::CancelInput) => {
+                app.cancel_input();
+                app.dirty = true;
+            }
+            Some(Hit::Ignore) | None => {}
+        },
         MouseEventKind::ScrollDown => {
-            if let Some(pane) = pane {
+            if app.input.is_some() || app.show_help || app.asking_pr_verdict {
+                return;
+            }
+            if let Some(pane) = app.pane_at(mouse.column, mouse.row) {
                 app.focus_pane(pane);
             }
             app.scroll_focus_down();
         }
         MouseEventKind::ScrollUp => {
-            if let Some(pane) = pane {
+            if app.input.is_some() || app.show_help || app.asking_pr_verdict {
+                return;
+            }
+            if let Some(pane) = app.pane_at(mouse.column, mouse.row) {
                 app.focus_pane(pane);
             }
             app.scroll_focus_up();
@@ -165,11 +178,11 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
 
     if app.asking_pr_verdict && app.input.is_none() {
         match key.code {
-            KeyCode::Enter => app.submit_derived_pr_verdict(),
-            KeyCode::Char('x') => app.begin_follow_up(),
-            KeyCode::Esc => app.cancel_pr_verdict_prompt(),
-            KeyCode::Char('?') => app.show_help = !app.show_help,
-            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Enter => app.run_action(Action::SubmitPrVerdict),
+            KeyCode::Char('x') => app.run_action(Action::FollowUp),
+            KeyCode::Esc => app.run_action(Action::CancelPrVerdict),
+            KeyCode::Char('?') => app.run_action(Action::Help),
+            KeyCode::Char('q') => app.run_action(Action::Quit),
             _ => {}
         }
         return;
@@ -188,15 +201,15 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
     }
 
     match key.code {
-        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('q') => app.run_action(Action::Quit),
         KeyCode::Esc => {
             if app.show_help {
-                app.show_help = false;
+                app.dismiss_overlay();
             } else {
-                app.should_quit = true;
+                app.run_action(Action::Quit);
             }
         }
-        KeyCode::Char('?') => app.show_help = !app.show_help,
+        KeyCode::Char('?') => app.run_action(Action::Help),
 
         KeyCode::Char('j') | KeyCode::Down => app.select_next(),
         KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
@@ -206,17 +219,17 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::Char('J') | KeyCode::PageDown => app.scroll_detail_down(),
         KeyCode::Char('K') | KeyCode::PageUp => app.scroll_detail_up(),
 
-        KeyCode::Char('v') | KeyCode::Char('a') => app.set_verdict(Verdict::Validated),
-        KeyCode::Char('d') => app.set_verdict(Verdict::Dismissed),
-        KeyCode::Char('u') => app.set_verdict(Verdict::Pending),
-        KeyCode::Char('e') => app.set_verdict(Verdict::Edited),
-        KeyCode::Char('b') => app.toggle_impact(),
+        KeyCode::Char('v') | KeyCode::Char('a') => app.run_action(Action::Validate),
+        KeyCode::Char('d') => app.run_action(Action::Dismiss),
+        KeyCode::Char('u') => app.run_action(Action::Reset),
+        KeyCode::Char('e') => app.run_action(Action::Edited),
+        KeyCode::Char('b') => app.run_action(Action::ToggleImpact),
 
-        KeyCode::Char('n') => app.begin_input(Input::Note),
-        KeyCode::Char('c') => app.begin_input(Input::Chat),
-        KeyCode::Char('P') => app.nudge_post(),
+        KeyCode::Char('n') => app.run_action(Action::Note),
+        KeyCode::Char('c') => app.run_action(Action::Chat),
+        KeyCode::Char('P') => app.run_action(Action::Overall),
 
-        KeyCode::Char('r') => app.force_reload(),
+        KeyCode::Char('r') => app.run_action(Action::Refresh),
         _ => {}
     }
 }
@@ -224,7 +237,8 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Finding, Location, PrInfo, SessionMeta, Severity, Side, State};
+    use crate::model::{Finding, Location, PrInfo, SessionMeta, Severity, Side, State, Verdict};
+    use crate::tui::app::Input;
     use ratatui::backend::TestBackend;
 
     fn buffer_text(term: &Terminal<TestBackend>) -> String {
@@ -296,9 +310,13 @@ mod tests {
                 .unwrap();
         }
         let mut app = App::new(store).unwrap();
-        let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        term.draw(|f| ui::draw(f, &mut app)).unwrap();
+        redraw(&mut app);
         app
+    }
+
+    fn redraw(app: &mut App) {
+        let mut term = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        term.draw(|f| ui::draw(f, app)).unwrap();
     }
 
     fn click(column: u16, row: u16) -> Event {
@@ -367,13 +385,54 @@ mod tests {
     }
 
     #[test]
-    fn the_help_overlay_swallows_mouse_input() {
+    fn clicking_help_closes_it_without_changing_the_selection() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = drawn_app(dir.path(), 3);
         app.show_help = true;
+        redraw(&mut app);
         let (x, y) = (app.list_area.x + 4, app.list_area.y + 3);
         handle_event(&mut app, click(x, y));
+        assert!(!app.show_help);
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn clicking_a_footer_chip_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = drawn_app(dir.path(), 0);
+        let rect = app
+            .hit_rect(Hit::Action(Action::Validate))
+            .expect("validate chip");
+        handle_event(&mut app, click(rect.x, rect.y));
+        assert_eq!(
+            app.state.findings[0].verdict,
+            crate::model::Verdict::Validated
+        );
+    }
+
+    #[test]
+    fn clicking_the_pr_verdict_submit_button_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = drawn_app(dir.path(), 0);
+        Store::new(dir.path())
+            .update(|s| {
+                s.status = crate::model::ReviewStatus::AwaitingReview;
+                Ok(())
+            })
+            .unwrap();
+        app.force_reload();
+        app.set_verdict(crate::model::Verdict::Validated);
+        assert!(app.asking_pr_verdict);
+        redraw(&mut app);
+        let rect = app
+            .hit_rect(Hit::Action(Action::SubmitPrVerdict))
+            .expect("submit button");
+        handle_event(&mut app, click(rect.x, rect.y));
+        assert!(!app.asking_pr_verdict);
+        assert_eq!(
+            app.state.pr_verdict,
+            Some(crate::model::OverallVerdict::Comment)
+        );
     }
 
     #[test]
