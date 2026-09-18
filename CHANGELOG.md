@@ -1,3 +1,10 @@
+# [2.4.0](https://github.com/rudironsoni/herdr-co-review/compare/v2.3.0...v2.4.0) (2026-09-18)
+
+
+### Features
+
+* copy tui text with mouse drag ([#5](https://github.com/rudironsoni/herdr-co-review/issues/5)) ([f11397d](https://github.com/rudironsoni/herdr-co-review/commit/f11397dafcb3f17f9ec6afbc7c42d0339e0a1768))
+
 # [2.3.0](https://github.com/rudironsoni/herdr-co-review/compare/v2.2.0...v2.3.0) (2026-09-17)
 
 

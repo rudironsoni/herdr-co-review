@@ -7,7 +7,7 @@
 
 id = "rudironsoni.co-review"
 name = "co-review"
-version = "2.3.0"
+version = "2.4.0"
 min_herdr_version = "0.8.0"
 description = "Interactive, split-screen PR co-review between you and your AI agent."
 platforms = ["linux", "macos"]
