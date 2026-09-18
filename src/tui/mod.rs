@@ -25,7 +25,7 @@ use ratatui::Terminal;
 
 use crate::cli::ViewArgs;
 use crate::store::Store;
-use app::{Action, App, Hit, Pane};
+use app::{Action, App};
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -93,6 +93,15 @@ fn run_loop(terminal: &mut Tui, app: &mut App) -> Result<()> {
             handle_event(app, event::read()?);
         }
 
+        if app.capture_dirty {
+            if app.mouse_captured {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
+            app.capture_dirty = false;
+        }
+
         app.tick_status();
         app.tick_agent();
         app.poll_reload();
@@ -117,30 +126,17 @@ fn handle_event(app: &mut App, ev: Event) {
     }
 }
 
-/// Clicking a pane focuses it (and, in the list, selects the finding under the
-/// cursor). Footer chips and overlay buttons run the same actions as the keys.
-/// The wheel scrolls whichever pane is focused, after a wheel event over a pane
-/// focuses it too.
+/// Click vs drag: Down stores a pending gesture. Up on the same cell runs the
+/// hit. Drag in findings/detail/help selects text. The wheel still scrolls the
+/// pane under the cursor.
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    if !app.mouse_captured {
+        return;
+    }
     match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => match app.hit_at(mouse.column, mouse.row) {
-            Some(Hit::Findings) => {
-                app.focus_pane(Pane::Findings);
-                app.select_at_row(mouse.row);
-                app.dirty = true;
-            }
-            Some(Hit::Detail) => {
-                app.focus_pane(Pane::Detail);
-                app.dirty = true;
-            }
-            Some(Hit::Action(action)) => app.run_action(action),
-            Some(Hit::DismissOverlay) => app.dismiss_overlay(),
-            Some(Hit::CancelInput) => {
-                app.cancel_input();
-                app.dirty = true;
-            }
-            Some(Hit::Ignore) | None => {}
-        },
+        MouseEventKind::Down(MouseButton::Left) => app.mouse_down(mouse.column, mouse.row),
+        MouseEventKind::Drag(MouseButton::Left) => app.mouse_drag(mouse.column, mouse.row),
+        MouseEventKind::Up(MouseButton::Left) => app.mouse_up(mouse.column, mouse.row),
         MouseEventKind::ScrollDown => {
             if app.input.is_some() || app.show_help || app.asking_pr_verdict {
                 return;
@@ -230,6 +226,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::Char('P') => app.run_action(Action::Overall),
 
         KeyCode::Char('r') => app.run_action(Action::Refresh),
+        KeyCode::Char('m') => app.toggle_mouse_capture(),
         _ => {}
     }
 }
@@ -238,7 +235,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
 mod tests {
     use super::*;
     use crate::model::{Finding, Location, PrInfo, SessionMeta, Severity, Side, State, Verdict};
-    use crate::tui::app::Input;
+    use crate::tui::app::{Hit, Input, Pane};
     use ratatui::backend::TestBackend;
 
     fn buffer_text(term: &Terminal<TestBackend>) -> String {
@@ -319,8 +316,15 @@ mod tests {
         term.draw(|f| ui::draw(f, app)).unwrap();
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+    fn click_at(app: &mut App, column: u16, row: u16) {
+        handle_event(
+            app,
+            mouse(MouseEventKind::Down(MouseButton::Left), column, row),
+        );
+        handle_event(
+            app,
+            mouse(MouseEventKind::Up(MouseButton::Left), column, row),
+        );
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
@@ -337,7 +341,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = drawn_app(dir.path(), 3);
         let (x, row) = (app.list_area.x + 4, app.list_area.y + 3); // third row
-        handle_event(&mut app, click(x, row));
+        click_at(&mut app, x, row);
         assert_eq!(app.selected, 2);
         assert_eq!(app.focus, Pane::Findings);
     }
@@ -347,7 +351,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = drawn_app(dir.path(), 1);
         let (x, row) = (app.list_area.x + 4, app.list_area.bottom() - 2);
-        handle_event(&mut app, click(x, row));
+        click_at(&mut app, x, row);
         assert_eq!(app.selected, 0);
     }
 
@@ -358,7 +362,7 @@ mod tests {
         assert_eq!(app.focus, Pane::Findings);
 
         let (x, y) = (app.detail_area.x + 4, app.detail_area.y + 2);
-        handle_event(&mut app, click(x, y));
+        click_at(&mut app, x, y);
         assert_eq!(app.focus, Pane::Detail);
 
         // The wheel now scrolls the detail, not the findings list.
@@ -390,8 +394,7 @@ mod tests {
         let mut app = drawn_app(dir.path(), 3);
         app.show_help = true;
         redraw(&mut app);
-        let (x, y) = (app.list_area.x + 4, app.list_area.y + 3);
-        handle_event(&mut app, click(x, y));
+        click_at(&mut app, 0, 0);
         assert!(!app.show_help);
         assert_eq!(app.selected, 0);
     }
@@ -403,10 +406,70 @@ mod tests {
         let rect = app
             .hit_rect(Hit::Action(Action::Validate))
             .expect("validate chip");
-        handle_event(&mut app, click(rect.x, rect.y));
+        click_at(&mut app, rect.x, rect.y);
         assert_eq!(
             app.state.findings[0].verdict,
             crate::model::Verdict::Validated
+        );
+    }
+
+    #[test]
+    fn dragging_in_detail_selects_text_without_changing_the_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = drawn_app(dir.path(), 3);
+        let selected = app.selected;
+        let x0 = app.detail_area.x + 2;
+        let y0 = app.detail_area.y + 2;
+        let x1 = x0 + 10;
+        handle_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), x0, y0),
+        );
+        handle_event(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), x1, y0),
+        );
+        redraw(&mut app);
+        handle_event(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), x1, y0),
+        );
+        assert_eq!(app.selected, selected);
+        let text = app
+            .selection
+            .as_ref()
+            .map(|s| s.text.as_str())
+            .unwrap_or("");
+        assert!(
+            !text.is_empty(),
+            "drag must capture detail text, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn dragging_off_a_chip_does_not_run_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = drawn_app(dir.path(), 0);
+        let rect = app
+            .hit_rect(Hit::Action(Action::Validate))
+            .expect("validate chip");
+        let (x0, y0) = (rect.x, rect.y);
+        let (x1, y1) = (app.list_area.x + 4, app.list_area.y + 2);
+        handle_event(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), x0, y0),
+        );
+        handle_event(
+            &mut app,
+            mouse(MouseEventKind::Drag(MouseButton::Left), x1, y1),
+        );
+        handle_event(
+            &mut app,
+            mouse(MouseEventKind::Up(MouseButton::Left), x1, y1),
+        );
+        assert_eq!(
+            app.state.findings[0].verdict,
+            crate::model::Verdict::Pending
         );
     }
 
@@ -427,7 +490,7 @@ mod tests {
         let rect = app
             .hit_rect(Hit::Action(Action::SubmitPrVerdict))
             .expect("submit button");
-        handle_event(&mut app, click(rect.x, rect.y));
+        click_at(&mut app, rect.x, rect.y);
         assert!(!app.asking_pr_verdict);
         assert_eq!(
             app.state.pr_verdict,

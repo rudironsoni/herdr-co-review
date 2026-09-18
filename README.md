@@ -170,8 +170,8 @@ co-review start 123 --dry-run           # offline preview of everything it will 
 The mouse works too: click a finding to select it, click a pane to focus it (its
 border lights up), click a footer chip to run that action, click overlay
 buttons (or outside an overlay to dismiss it), and the wheel scrolls the pane
-under the cursor. Because the navigator captures the mouse, use `Shift`+drag to
-select text with your terminal.
+under the cursor. Drag across findings, detail, or help to select text and copy
+it. Press `m` if you want the terminal or Herdr to select text instead.
 
 Findings appear live as the agent records them; your verdicts and notes are
 visible to the agent immediately.

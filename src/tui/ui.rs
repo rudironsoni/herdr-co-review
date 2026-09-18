@@ -1,6 +1,7 @@
 //! Rendering the navigator: header, findings list, detail + related code,
 //! footer/status, input line, and a help overlay.
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -9,7 +10,7 @@ use ratatui::Frame;
 
 use crate::herdr::AgentState;
 use crate::model::{Severity, Verdict};
-use crate::tui::app::{Action, App, Hit, Input, Pane};
+use crate::tui::app::{Action, App, Hit, Input, Pane, Selection};
 
 const FOOTER_CHIPS: &[(&str, Action)] = &[
     ("[v]alidate", Action::Validate),
@@ -67,13 +68,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     if app.show_help {
-        draw_help(f, size);
+        let help_area = draw_help(f, size);
         hits.push((size, Hit::DismissOverlay));
+        hits.push((help_area, Hit::Help));
+        app.help_area = help_area;
+    } else {
+        app.help_area = Rect::default();
     }
     if app.asking_pr_verdict {
         draw_pr_verdict(f, app, size, &mut hits);
     }
     app.record_hits(hits);
+    if let Some(sel) = app.selection.as_mut() {
+        paint_selection(f.buffer_mut(), sel);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -380,7 +388,7 @@ fn input_paragraph(app: &App) -> Paragraph<'static> {
     Paragraph::new(line).block(block).wrap(Wrap { trim: false })
 }
 
-fn draw_help(f: &mut Frame, size: Rect) {
+fn draw_help(f: &mut Frame, size: Rect) -> Rect {
     let area = centered_rect(70, 70, size);
     f.render_widget(Clear, area);
     let help = vec![
@@ -397,12 +405,13 @@ fn draw_help(f: &mut Frame, size: Rect) {
         Line::from("Mouse"),
         Line::from("  click             select a finding · focus a pane (lit border)"),
         Line::from("  click footer      same actions as the keys in each chip"),
-        Line::from("  click overlay     buttons run; outside dismisses; help closes"),
+        Line::from("  click overlay     buttons run; outside dismisses"),
         Line::from("  wheel             scrolls the pane under the cursor"),
-        Line::from("  shift + drag      select text (the TUI grabs the mouse)"),
+        Line::from("  drag              select text and copy it"),
+        Line::from("  m                 let the terminal/Herdr select text"),
         Line::from(""),
         Line::from(Span::styled(
-            "click anywhere to close this help",
+            "click outside to close this help · drag to copy",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
@@ -416,7 +425,7 @@ fn draw_help(f: &mut Frame, size: Rect) {
         Line::from("  P  after all findings: pick/resend the overall result"),
         Line::from(""),
         Line::from("Other"),
-        Line::from("  r  force refresh    ?  toggle this help    q / Esc  quit"),
+        Line::from("  r  force refresh    ?  toggle this help    m  mouse on/off    q / Esc  quit"),
         Line::from(""),
         Line::from(Span::styled(
             "Findings appear live as the agent records them; your verdicts and notes",
@@ -435,6 +444,56 @@ fn draw_help(f: &mut Frame, size: Rect) {
             .wrap(Wrap { trim: false }),
         area,
     );
+    area
+}
+
+fn paint_selection(buf: &mut Buffer, sel: &mut Selection) {
+    let mut text = String::new();
+    let mut last_row: Option<u16> = None;
+    let mut line = String::new();
+    for (x, y) in stream_cells(sel.area, sel.start, sel.end) {
+        if last_row.is_some() && last_row != Some(y) {
+            push_sel_line(&mut text, &mut line);
+        }
+        last_row = Some(y);
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_style(Style::default().add_modifier(Modifier::REVERSED));
+            line.push_str(cell.symbol());
+        }
+    }
+    if last_row.is_some() {
+        push_sel_line(&mut text, &mut line);
+    }
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    sel.text = text;
+}
+
+fn push_sel_line(text: &mut String, line: &mut String) {
+    text.push_str(line.trim_end());
+    text.push('\n');
+    line.clear();
+}
+
+fn stream_cells(area: Rect, start: (u16, u16), end: (u16, u16)) -> Vec<(u16, u16)> {
+    let (a, b) = if (start.1, start.0) <= (end.1, end.0) {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let mut out = Vec::new();
+    let last_x = area.right().saturating_sub(1);
+    for y in a.1..=b.1 {
+        let x0 = if y == a.1 { a.0 } else { area.x };
+        let x1 = if y == b.1 { b.0 } else { last_x };
+        for x in x0..=x1 {
+            if area.contains((x, y).into()) {
+                out.push((x, y));
+            }
+        }
+    }
+    out
 }
 
 fn draw_pr_verdict(f: &mut Frame, app: &App, size: Rect, hits: &mut Vec<(Rect, Hit)>) {

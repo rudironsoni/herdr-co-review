@@ -336,6 +336,14 @@ buttons, click-outside to dismiss. Clicks call the same `App::run_action` path
 as the keys. Hover and scrollbar-thumb drag stay out: `Moved` would repaint on
 every cell, and the built-in scrollbar is paint-only.)*
 
+*(2026-09-18 addendum: capture still steals the terminal's native drag-select,
+and Herdr does not always honor `Shift`+drag as an escape hatch. The navigator
+now owns selection: `Down` is only a pending gesture, `Up` on the same cell is
+the click, and a drag in findings/detail/help highlights cells from the last
+paint and copies via OSC 52 (`crossterm` `CopyToClipboard`). `m` turns capture
+off so Herdr or the terminal can select text when OSC 52 does not pass through.
+Help dismisses on a click outside the box, not on a drag inside it.)*
+
 ## 17. Installing the plugin puts `co-review` on the user's PATH
 
 *(2026-09-04 addendum: since §15's rework this symlink is convenience only — it
