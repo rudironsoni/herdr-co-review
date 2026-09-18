@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ratatui::layout::Rect;
+use crossterm::clipboard::CopyToClipboard;
+use crossterm::execute;
+use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -40,13 +42,29 @@ pub enum Pane {
 pub enum Hit {
     Findings,
     Detail,
+    Help,
     Action(Action),
-    /// Click outside (or on) the help overlay, or outside the PR-verdict overlay.
+    /// Click outside the help overlay, or outside the PR-verdict overlay.
     DismissOverlay,
     /// Click outside the input box while a note/chat/follow-up is open.
     CancelInput,
     /// Consume the click (the input box itself).
     Ignore,
+}
+
+/// In-app text selection, clipped to one pane's inner rect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    pub area: Rect,
+    pub start: (u16, u16),
+    pub end: (u16, u16),
+    pub text: String,
+}
+
+struct Gesture {
+    origin: (u16, u16),
+    hit: Option<Hit>,
+    dragging: bool,
 }
 
 /// One human action. Keys and footer/overlay clicks both call `App::run_action`.
@@ -91,10 +109,15 @@ pub struct App {
     /// written back by the renderer so mouse clicks can be mapped to a finding.
     pub list_area: Rect,
     pub detail_area: Rect,
+    pub help_area: Rect,
     pub list_offset: usize,
     detail_max_scroll: u16,
     /// Click targets from the last paint, back to front (last match wins).
     hits: Vec<(Rect, Hit)>,
+    gesture: Option<Gesture>,
+    pub selection: Option<Selection>,
+    pub mouse_captured: bool,
+    pub capture_dirty: bool,
 
     pub input: Option<Input>,
     pub input_buffer: String,
@@ -135,9 +158,14 @@ impl App {
             focus: Pane::Findings,
             list_area: Rect::default(),
             detail_area: Rect::default(),
+            help_area: Rect::default(),
             list_offset: 0,
             detail_max_scroll: 0,
             hits: Vec::new(),
+            gesture: None,
+            selection: None,
+            mouse_captured: true,
+            capture_dirty: false,
             input: None,
             input_buffer: String::new(),
             asking_pr_verdict: false,
@@ -241,6 +269,7 @@ impl App {
         let prev = self.selected_id();
         self.state = new_state;
         self.reconcile_selection(prev.as_deref());
+        self.clear_selection();
         self.code_cache.clear();
         self.ensure_code();
         self.dirty = true;
@@ -299,6 +328,7 @@ impl App {
     }
 
     fn after_move(&mut self) {
+        self.clear_selection();
         self.focus_pane(Pane::Findings);
         self.detail_scroll = 0;
         self.ensure_code();
@@ -306,6 +336,7 @@ impl App {
     }
 
     pub fn scroll_detail_down(&mut self) {
+        self.clear_selection();
         self.focus_pane(Pane::Detail);
         self.detail_scroll = self
             .detail_scroll
@@ -315,6 +346,7 @@ impl App {
     }
 
     pub fn scroll_detail_up(&mut self) {
+        self.clear_selection();
         self.focus_pane(Pane::Detail);
         self.detail_scroll = self.detail_scroll.saturating_sub(3);
         self.dirty = true;
@@ -438,6 +470,117 @@ impl App {
             Pane::Findings => self.select_prev(),
             Pane::Detail => self.scroll_detail_up(),
         }
+    }
+
+    pub fn toggle_mouse_capture(&mut self) {
+        self.mouse_captured = !self.mouse_captured;
+        self.capture_dirty = true;
+        if self.mouse_captured {
+            self.set_status("mouse on · drag copies text");
+        } else {
+            self.gesture = None;
+            self.clear_selection();
+            self.set_status("mouse off · terminal/Herdr can select text");
+        }
+    }
+
+    pub fn mouse_down(&mut self, col: u16, row: u16) {
+        self.clear_selection();
+        self.gesture = Some(Gesture {
+            origin: (col, row),
+            hit: self.hit_at(col, row),
+            dragging: false,
+        });
+        self.dirty = true;
+    }
+
+    pub fn mouse_drag(&mut self, col: u16, row: u16) {
+        let (origin, hit, dragging) = {
+            let Some(g) = self.gesture.as_mut() else {
+                return;
+            };
+            if (col, row) != g.origin {
+                g.dragging = true;
+            }
+            (g.origin, g.hit, g.dragging)
+        };
+        if !dragging {
+            return;
+        }
+        let Some(area) = self.selectable_area(hit) else {
+            return;
+        };
+        self.selection = Some(Selection {
+            area,
+            start: clamp_cell(origin.0, origin.1, area),
+            end: clamp_cell(col, row, area),
+            text: String::new(),
+        });
+        self.dirty = true;
+    }
+
+    pub fn mouse_up(&mut self, _col: u16, _row: u16) {
+        let Some(g) = self.gesture.take() else {
+            return;
+        };
+        if g.dragging {
+            if self.selection.is_some() {
+                self.copy_selection();
+            }
+            return;
+        }
+        self.apply_click(g.origin.0, g.origin.1, g.hit);
+    }
+
+    fn apply_click(&mut self, _col: u16, row: u16, hit: Option<Hit>) {
+        match hit {
+            Some(Hit::Findings) => {
+                self.focus_pane(Pane::Findings);
+                self.select_at_row(row);
+                self.dirty = true;
+            }
+            Some(Hit::Detail) => {
+                self.focus_pane(Pane::Detail);
+                self.dirty = true;
+            }
+            Some(Hit::Help) => {}
+            Some(Hit::Action(action)) => self.run_action(action),
+            Some(Hit::DismissOverlay) => self.dismiss_overlay(),
+            Some(Hit::CancelInput) => {
+                self.cancel_input();
+                self.dirty = true;
+            }
+            Some(Hit::Ignore) | None => {}
+        }
+    }
+
+    fn selectable_area(&self, hit: Option<Hit>) -> Option<Rect> {
+        let area = match hit? {
+            Hit::Findings => inner_pane(self.list_area),
+            Hit::Detail => inner_pane(self.detail_area),
+            Hit::Help => inner_pane(self.help_area),
+            _ => None,
+        }?;
+        (area.width > 0 && area.height > 0).then_some(area)
+    }
+
+    fn clear_selection(&mut self) {
+        if self.selection.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(text) = self.selection.as_ref().map(|s| s.text.clone()) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        if !cfg!(test) {
+            let _ = execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(&text));
+        }
+        self.set_status(format!("copied {} chars", text.chars().count()));
     }
 
     /// Set the selected finding's verdict.
@@ -750,6 +893,17 @@ impl App {
             })
             .collect()
     }
+}
+
+fn inner_pane(area: Rect) -> Option<Rect> {
+    let inner = area.inner(Margin::new(1, 1));
+    (inner.width > 0 && inner.height > 0).then_some(inner)
+}
+
+fn clamp_cell(col: u16, row: u16, area: Rect) -> (u16, u16) {
+    let max_x = area.x.saturating_add(area.width.saturating_sub(1));
+    let max_y = area.y.saturating_add(area.height.saturating_sub(1));
+    (col.clamp(area.x, max_x), row.clamp(area.y, max_y))
 }
 
 fn snippet_header(snippet: &CodeSnippet) -> String {
